@@ -1,0 +1,79 @@
+source_repo: ONE-Lab/HQ-video-data
+target_repo: your-org/filtered-hq-video
+workdir: /data/world_model
+
+# 待处理的压缩包文件名（示例），以 50GB 压缩包为粒度
+shards:
+  - HQ-video-data-00001.zip
+  - HQ-video-data-00002.zip
+
+# 场景切分配置（Base Pool 升级为 PySceneDetect）
+splitter:
+  kind: pyscenedetect
+  threshold: 27.0       # AdaptiveDetector 阈值
+  min_scene_len: 16     # 帧数，约 0.5s（30fps 场景）
+  remove_source_after_split: false  # 若磁盘紧张可设为 true（会删除原视频，仅保留切分片段）
+
+# 闪烁过滤（Flash Filter）
+flash_filter:
+  enabled: true
+  brightness_delta: 60.0   # 相邻采样帧亮度跳变阈值
+  max_flash_ratio: 0.2     # 超过比例则视为闪烁
+  sample_stride: 5         # 采样帧间隔
+
+models:
+  # 基线占位符，始终返回 1.0 用于快速连通性验证
+  - name: sanity
+    kind: dummy
+    threshold: 0.0
+    device: cpu
+    batch_size: 8
+  # Dover 示例，需在 models.py 中补全加载/推理实现
+  - name: dover
+    kind: dover
+    threshold: 0.7
+    device: cuda:0
+    batch_size: 8
+    # Dover 额外参数（可选）
+    repo_path: ./DOVER
+    config_path: dover.yml          # 相对 repo_path
+    weight_path: pretrained_weights/DOVER.pth
+    data_key: val-l1080p            # 使用的采样配置
+    output: fused                   # fused | technical | aesthetic
+  # 可选：LAION-AES（如需在 Base 阶段加入美学得分，需补全实现）
+  - name: aes
+    kind: laion_aes
+    threshold: 0.25
+    device: cuda:1
+    batch_size: 32
+    # AES 额外参数（可选）
+    clip_model: ViT-L-14
+    pretrained: openai
+    weight_path: aesthetic-predictor/sa_0_4_vit_l_14_linear.pth
+    num_frames: 8
+  # UniMatch 光流（运动过滤），用于剔除低运动/PPT
+  - name: motion
+    kind: unimatch_flow
+    threshold: 0.5          # 光流幅值均值阈值，需实测调整
+    device: cuda:2
+    batch_size: 1
+    repo_path: ./unimatch
+    weight_path: pretrained/gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth
+    num_pairs: 3
+    resize: [320, 576]      # 可选，下采样以减算力；删除则用原分辨率
+    padding_factor: 16
+    num_scales: 1
+    upsample_factor: 8
+    attn_splits_list: [2]
+    corr_radius_list: [-1]
+    prop_radius_list: [-1]
+    num_reg_refine: 1
+
+upload:
+  chunk_size_mb: 512
+  max_workers: 3
+
+ffmpeg:
+  audio_sample_rate: 16000
+  max_width: 480
+  max_height: 360
