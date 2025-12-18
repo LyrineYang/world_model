@@ -39,6 +39,14 @@ class FlashFilterConfig:
 
 
 @dataclass
+class OCRConfig:
+    enabled: bool = False
+    text_area_threshold: float = 0.02
+    sample_stride: int = 10
+    lang: str = "ch"
+
+
+@dataclass
 class FFmpegConfig:
     audio_sample_rate: int = 16000
     max_width: int = 480
@@ -55,6 +63,7 @@ class Config:
     upload: UploadConfig
     splitter: SplitterConfig
     flash_filter: FlashFilterConfig
+    ocr: OCRConfig
     ffmpeg: FFmpegConfig
     limit_shards: int | None = None
     skip_upload: bool = False
@@ -122,6 +131,7 @@ def load_config(path: Path, limit_shards: int | None = None, skip_upload: bool =
         upload=UploadConfig(**raw.get("upload", {})),
         splitter=SplitterConfig(**raw.get("splitter", {})),
         flash_filter=FlashFilterConfig(**raw.get("flash_filter", {})),
+        ocr=OCRConfig(**raw.get("ocr", {})),
         ffmpeg=FFmpegConfig(**raw.get("ffmpeg", {})),
         limit_shards=limit_shards,
         skip_upload=skip_upload,

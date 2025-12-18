@@ -2,6 +2,18 @@
 
 面向大体量视频数据（例：`ONE-Lab/HQ-video-data`，每包 50GB）的精简管线：下载 → 解压 → **PySceneDetect 切分** → 闪烁过滤 → 模型打分筛选 → 元数据输出 → 上传到新的 HF 数据集。默认按压缩包为处理单元，便于 7TB 级别吞吐和断点续跑。
 
+## 流程细节（每步做什么、如何筛选）
+- 下载/解压：从 `source_repo` 拉取 `shards` 列表中的压缩包到 `workdir/downloads/`，安全解压到 `workdir/extract/{shard}/`。
+- 场景切分：PySceneDetect `AdaptiveDetector`，`threshold`/`min_scene_len` 控制敏感度；片段写入 `extract/{shard}/scenes/`，可选删除原视频。
+- 闪烁过滤：亮度跳变检测（`brightness_delta`、`max_flash_ratio`、`sample_stride`），判定闪烁的片段标记 `reason=flash`，不保留。
+- 模型打分：按 `models` 列表加载 scorer，对片段打分：
+  - `dover`：视频质量（技术+美学）得分，默认 0~1，阈值筛选。
+  - `laion_aes`：CLIP+线性头美学得分，均匀采样 `num_frames` 帧取均值。
+  - `unimatch_flow`：光流幅值均值，代表运动量，可过滤 PPT/静态内容。
+  - `dummy`：恒 1.0，用于通路验证。
+ 评分异常标记 `scoring_error`，否则逐模型与各自 `threshold` 比较；全部达标才 `keep=True`。
+- 输出与上传：保留片段硬链/拷贝到 `workdir/output/{shard}/videos/`，元数据写 `metadata.jsonl`（source/output 路径、大小、scores、keep、reason）；未加 `--skip-upload` 时，将 `output/{shard}` 上传到 `target_repo`。当前未包含 OCR/字幕过滤，如需可在 `pipeline/models.py` 扩展自定义 scorer。
+
 ## 快速开始（统一环境流程）
 ### 前置要求
 - Python 3.10+，系统已安装 `ffmpeg`
@@ -76,7 +88,8 @@ python -m pipeline.pipeline --config config.yaml
 - 权重：
   - DOVER：默认自动从 HF `teowu/DOVER` 下载到 `DOVER/pretrained_weights/DOVER.pth`；可提前放好或使用 DOVER-Mobile 替代。
   - LAION-AES：线性头已包含在 `aesthetic-predictor/sa_0_4_vit_l_14_linear.pth`；open_clip 会自动下载主干权重。
-  - UniMatch：需手动下载光流权重到 `unimatch/pretrained/`（示例脚本 `scripts/download_unimatch_weights.sh` 会下载 `gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth`）。可在 `config.yaml` 的模型 `extra.weight_path` 指定路径。
+  - UniMatch（运动过滤，需权重）：手动下载到 `unimatch/pretrained/`（示例脚本 `scripts/download_unimatch_weights.sh` 会下载 `gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth`）。在 `config.yaml` 的模型 `extra.weight_path` 指定路径。
+  - OCR（文字过滤，可选）：使用 PaddleOCR（已在 requirements），无需额外权重；在 `config.yaml` 设置 `ocr.enabled` 与占比阈值。
 - 不打包源码时：在 `config.yaml` 中通过 `repo_path/weight_path` 指向外部路径，并保证可访问对应仓库/权重：
   - DOVER 源码 `https://github.com/QualityAssessment/DOVER.git`
   - UniMatch 源码 `https://github.com/haofeixu/unimatch.git`

@@ -84,20 +84,32 @@ def process_shard(cfg: Config, shard: str) -> None:
     else:
         filtered_clips = scene_clips
 
+    # OCR 文字过滤
+    ocr_dropped: list[ScoreResult] = []
+    ocr_filtered: list[Path] = []
+    if cfg.ocr.enabled and filtered_clips:
+        for clip in tqdm(filtered_clips, desc="OCR filter", unit="clip"):
+            if has_text(clip, cfg.ocr):
+                ocr_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="ocr_text"))
+            else:
+                ocr_filtered.append(clip)
+    else:
+        ocr_filtered = filtered_clips
+
     try:
         scorers = build_scorers(cfg.models)
     except Exception as exc:  # noqa: BLE001
         log.exception("Scorer initialization failed: %s", exc)
         # 标记整片分片为失败，避免静默退出
         failed_result = [
-            ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in scene_clips
+            ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in ocr_filtered
         ]
         metadata_path = materialize_results(shard, failed_result, cfg.output_dir)
         log.info("Metadata written to %s", metadata_path)
         return
-    log.info("Scoring %d clips with %d models", len(filtered_clips), len(scorers))
-    scored_results = run_scorers(scorers, filtered_clips) if filtered_clips else []
-    results = split_failed + flash_dropped + scored_results
+    log.info("Scoring %d clips with %d models", len(ocr_filtered), len(scorers))
+    scored_results = run_scorers(scorers, ocr_filtered) if ocr_filtered else []
+    results = split_failed + flash_dropped + ocr_dropped + scored_results
     state["scored"] = True
     save_state(cfg.state_dir, shard, state)
 

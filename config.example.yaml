@@ -21,6 +21,13 @@ flash_filter:
   max_flash_ratio: 0.2     # 超过比例则视为闪烁
   sample_stride: 5         # 采样帧间隔
 
+# OCR 文字过滤（使用 PaddleOCR 检测文字占比，超过阈值丢弃）
+ocr:
+  enabled: false
+  text_area_threshold: 0.02   # 文字面积占帧面积的比例阈值
+  sample_stride: 10           # 每隔多少帧采样一次
+  lang: ch                    # OCR 语言，常用 ch/en
+
 models:
   # 基线占位符，始终返回 1.0 用于快速连通性验证
   - name: sanity
