@@ -20,7 +20,7 @@ git clone <本仓库地址>
 cd world_model
 # 如未内置第三方源码，可在根目录拉取依赖
 git clone https://github.com/QualityAssessment/DOVER.git DOVER
-git clone https://github.com/haofeixu/unimatch.git unimatch
+git clone https://github.com/autonomousvision/unimatch.git unimatch
 git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
 ```
 ### 前置要求
