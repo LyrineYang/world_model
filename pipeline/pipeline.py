@@ -137,6 +137,8 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
                 filtered_clips.append(clip)
     else:
         filtered_clips = scene_clips
+    if target_remaining is not None and len(filtered_clips) > target_remaining:
+        filtered_clips = filtered_clips[:target_remaining]
     summary["time_flash"] = time.time() - t_flash
     summary["clips_after_flash"] = len(filtered_clips)
 
