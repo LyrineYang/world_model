@@ -63,7 +63,14 @@ bash scripts/download_unimatch_weights.sh
 python -m pipeline.pipeline --config config.yaml
 # 仅处理前 N 个分片： --limit-shards N
 # 仅本地处理不上传： --skip-upload
-# 校准模式（采样分布，不上传，输出 calibration_meta.parquet）： --calibration --sample-size 10000
+
+校准模式（采样分布，不上传，输出 calibration_meta.parquet 并打印分位数）：
+
+```bash
+python -m pipeline.pipeline --config config.yaml --calibration --sample-size 10000 --skip-upload
+```
+
+校准默认分位数为 0.4 / 0.7，可用 `--calibration-quantiles 0.4,0.7,0.9` 调整；输出路径可用 `--calibration-output /path/to/calibration_meta.parquet` 指定。
 ```
 
 ## 配置要点
@@ -88,10 +95,10 @@ python -m pipeline.pipeline --config config.yaml
 - Base Pool 默认流程：PySceneDetect 切分 → Flash Filter → （可选）OCR 文字过滤 → Dover/AES/UniMatch 评分 → 阈值筛选。
 
 ## 模型与资源准备（发布/部署建议）
-- 如仓库未内置第三方源码，请在根目录拉取依赖：
+- 如仓库未内置第三方源码，请在根目录拉取依赖（建议用官方仓库）：
   ```bash
   git clone https://github.com/QualityAssessment/DOVER.git DOVER
-  git clone https://github.com/haofeixu/unimatch.git unimatch
+  git clone https://github.com/autonomousvision/unimatch.git unimatch
   git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
   ```
   若已有外部路径，可在 `config.yaml` 的模型 `extra.repo_path`/`weight_path` 指向。
@@ -99,7 +106,7 @@ python -m pipeline.pipeline --config config.yaml
 - 权重：
   - DOVER：默认自动从 HF `teowu/DOVER` 下载到 `DOVER/pretrained_weights/DOVER.pth`；可提前放好或使用 DOVER-Mobile 替代。
   - LAION-AES：线性头已包含在 `aesthetic-predictor/sa_0_4_vit_l_14_linear.pth`；open_clip 会自动下载主干权重。
-- UniMatch（运动过滤，需权重）：手动下载到 `unimatch/pretrained/`（示例脚本 `scripts/download_unimatch_weights.sh` 会下载 `gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth`）。在 `config.yaml` 的模型 `extra.weight_path` 指定路径。
+  - UniMatch（运动过滤，需权重）：手动下载到 `unimatch/pretrained/`（示例脚本 `scripts/download_unimatch_weights.sh` 会下载 `gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth`）。在 `config.yaml` 的模型 `extra.weight_path` 指定路径。
 - OCR（文字过滤，可选）：使用 PaddleOCR（已在 requirements），需按平台安装 `paddlepaddle` 或 `paddlepaddle-gpu`（参考官方安装命令/版本）。配置 `ocr.enabled`、`text_area_threshold`、`sample_stride`、`lang`。
 - 不打包源码时：在 `config.yaml` 中通过 `repo_path/weight_path` 指向外部路径，并保证可访问对应仓库/权重：
   - DOVER 源码 `https://github.com/QualityAssessment/DOVER.git`
