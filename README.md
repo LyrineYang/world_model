@@ -81,6 +81,7 @@ python -m pipeline.pipeline --config config.yaml --calibration --sample-size 100
 - `splitter`：Base Pool 场景切分，默认 `pyscenedetect`，推荐 `threshold=27.0`，`min_scene_len=16`（约 0.5s）。
 - `splitter.cut`：是否物理切割视频。默认 false（保留原视频）；仍用 PySceneDetect 标出场景，并在元数据写入虚拟切片窗口（按 `window_len_frames`/`window_stride_frames`，示例 121/60 帧）。
 - `flash_filter`：闪烁过滤（迪厅灯光等），默认开启，可调节亮度跳变阈值与采样步长。
+- `runtime`：流水线并行与流式参数（默认开启 stream_processing）；`scoring_workers=0` 表示按模型数自动并行多 GPU 打分，`queue_size` 控制切分→打分队列长度。示例默认按双卡 A800 分配：DOVER/motion 在 `cuda:0`，AES 在 `cuda:1`。
 - `models`：模型清单（如 `dover` / `laion_aes`）；`kind` 区分实现，`threshold` 用于筛选，`device` 绑定 GPU。可通过 `extra` 字段指定权重路径、采样策略等。
 - `upload`：HF 上传分块大小和并发。
 - `upload.resize_720p`：若为 true，保留视频将转码为 720p（ffmpeg libx264, preset=veryfast, crf=23），否则硬链/拷贝原视频。

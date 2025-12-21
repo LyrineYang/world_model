@@ -7,6 +7,12 @@ shards:
   - HQ-video-data-00001.zip
   - HQ-video-data-00002.zip
 
+# 运行与并行配置（默认双卡 A800）
+runtime:
+  stream_processing: true    # 边切分边打分的流式模式
+  scoring_workers: 0         # scorer 并行线程数，0=按模型数量自动
+  queue_size: 16             # 生产者-消费者队列长度
+
 # 场景切分配置
 splitter:
   kind: pyscenedetect
@@ -74,7 +80,7 @@ models:
   - name: motion
     kind: unimatch_flow
     threshold: 0.5          # 光流幅值均值阈值，需结合校准分布调整
-    device: cuda:2
+    device: cuda:0
     batch_size: 1
     repo_path: ./unimatch
     weight_path: pretrained/gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth

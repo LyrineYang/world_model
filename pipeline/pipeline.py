@@ -4,12 +4,14 @@ import logging
 import shutil
 from pathlib import Path
 import json
+import threading
+from queue import Queue
 
 import pandas as pd
 import time
 from tqdm import tqdm
 
-from .config import Config, load_config, parse_args
+from .config import Config, RuntimeConfig, load_config, parse_args
 from .calibration import compute_quantiles, write_calibration_parquet
 from .filtering import materialize_results
 from .flash import is_flashy
@@ -92,103 +94,243 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     if not video_files:
         log.warning("No video files found in shard %s", shard)
 
+    runtime_cfg: RuntimeConfig = getattr(cfg, "runtime", RuntimeConfig())
+    scoring_workers = runtime_cfg.scoring_workers if runtime_cfg.scoring_workers else max(len(cfg.models), 1)
+    queue_size = max(int(runtime_cfg.queue_size), 1)
+    use_stream = bool(runtime_cfg.stream_processing)
+
     # 计算校准剩余上限
     target_remaining = None
     if calibration_enabled and calibration_sample_size > 0:
         target_remaining = calibration_sample_size if calibration_remaining is None else calibration_remaining
 
-    # 场景切分
     scenes_root = extract_path / "scenes"
-    scene_clips: list[Path] = []
     split_failed: list[ScoreResult] = []
-    t_scene = time.time()
-    for video in tqdm(video_files, desc="Scene detect", unit="video"):
-        try:
-            spans = detect_scenes(video, cfg.splitter)
-            if cfg.splitter.cut:
-                clips = cut_and_collect(video, spans, cfg, scenes_root)
-                scene_clips.extend(clips)
-                if cfg.splitter.remove_source_after_split:
-                    video.unlink(missing_ok=True)
-            else:
-                scene_clips.append(video)
-                # 记录场景与窗口信息
-                extras[str(video)] = build_scene_windows(video, spans, cfg)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Scene detection failed for %s: %s", video, exc)
-            split_failed.append(ScoreResult(path=video, scores={}, keep=False, reason="split_failed"))
-        if target_remaining is not None and len(scene_clips) >= target_remaining:
-            break
-    summary["time_scene"] = time.time() - t_scene
-    summary["files"] = len(video_files)
-    summary["clips_after_scene"] = len(scene_clips)
-
-    if not scene_clips:
-        log.warning("No scene clips found in shard %s", shard)
-
-    # 闪烁过滤
     flash_dropped: list[ScoreResult] = []
-    filtered_clips: list[Path] = []
-    t_flash = time.time()
-    if cfg.flash_filter.enabled and scene_clips:
-        for clip in tqdm(scene_clips, desc="Flash filter", unit="clip"):
-            hit = is_flashy(clip, cfg.flash_filter)
-            extras.setdefault(str(clip), {})["flash_hit"] = hit
-            if hit and not cfg.flash_filter.record_only:
-                flash_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="flash"))
-            else:
-                filtered_clips.append(clip)
-    else:
-        filtered_clips = scene_clips
-    if target_remaining is not None and len(filtered_clips) > target_remaining:
-        filtered_clips = filtered_clips[:target_remaining]
-    summary["time_flash"] = time.time() - t_flash
-    summary["clips_after_flash"] = len(filtered_clips)
-
-    # OCR 文字过滤
     ocr_dropped: list[ScoreResult] = []
-    ocr_filtered: list[Path] = []
-    t_ocr = time.time()
-    if cfg.ocr.enabled and filtered_clips:
-        for clip in tqdm(filtered_clips, desc="OCR filter", unit="clip"):
-            hit = has_text(clip, cfg.ocr)
-            extras.setdefault(str(clip), {})["ocr_hit"] = hit
-            if hit and not cfg.ocr.record_only:
-                ocr_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="ocr_text"))
-            else:
-                ocr_filtered.append(clip)
-    else:
-        ocr_filtered = filtered_clips
-    if target_remaining is not None and len(ocr_filtered) > target_remaining:
-        ocr_filtered = ocr_filtered[:target_remaining]
-    summary["time_ocr"] = time.time() - t_ocr
-    summary["clips_after_ocr"] = len(ocr_filtered)
+    scored_results: list[ScoreResult] = []
+    scene_count = 0
+    flash_pass = 0
+    ocr_pass = 0
+    scene_time = 0.0
+    flash_time = 0.0
+    ocr_time = 0.0
 
-    try:
-        scorers = build_scorers(cfg.models)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Scorer initialization failed: %s", exc)
-        # 标记整片分片为失败，避免静默退出
-        failed_result = [
-            ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in ocr_filtered
-        ]
-        metadata_path = materialize_results(shard, failed_result, cfg.output_dir)
-        log.info("Metadata written to %s", metadata_path)
-        return
-    # 若校准模式启用，截断样本数量
-    if calibration_enabled and calibration_sample_size > 0:
-        limit = calibration_sample_size
-        if calibration_remaining is not None:
-            limit = max(min(calibration_remaining, calibration_sample_size), 0)
-        if len(ocr_filtered) > limit:
-            ocr_filtered = ocr_filtered[:limit]
-    t_score = time.time()
-    log.info("Scoring %d clips with %d models", len(ocr_filtered), len(scorers))
-    scored_results = run_scorers(scorers, ocr_filtered) if ocr_filtered else []
-    calibration_counter += len(ocr_filtered)
-    summary["time_score"] = time.time() - t_score
-    summary["clips_scored"] = len(ocr_filtered)
-    results = split_failed + flash_dropped + ocr_dropped + scored_results
+    def _batch_step(scorers_obj) -> int:
+        return min(max(getattr(s, "batch_size", 1), 1) for s in scorers_obj) if scorers_obj else 1
+
+    def _build_scorers_safe() -> tuple[list, Exception | None]:
+        try:
+            return build_scorers(cfg.models), None
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Scorer initialization failed: %s", exc)
+            return [], exc
+
+    if use_stream:
+        sentinel = object()
+        q: Queue[Path | object] = Queue(maxsize=queue_size)
+        scorer_init_error: Exception | None = None
+        scorers: list = []
+
+        def produce() -> None:
+            nonlocal scene_count, flash_pass, ocr_pass, scene_time, flash_time, ocr_time
+            produced = 0
+            sent = False
+            try:
+                for video in video_files:
+                    try:
+                        t0 = time.time()
+                        spans = detect_scenes(video, cfg.splitter)
+                        scene_time += time.time() - t0
+                        if cfg.splitter.cut:
+                            clips = cut_and_collect(video, spans, cfg, scenes_root)
+                            if cfg.splitter.remove_source_after_split:
+                                video.unlink(missing_ok=True)
+                        else:
+                            clips = [video]
+                            extras[str(video)] = build_scene_windows(video, spans, cfg)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("Scene detection failed for %s: %s", video, exc)
+                        split_failed.append(ScoreResult(path=video, scores={}, keep=False, reason="split_failed"))
+                        continue
+
+                    scene_count += len(clips)
+                    for clip in clips:
+                        if cfg.flash_filter.enabled:
+                            tf = time.time()
+                            flash_hit = is_flashy(clip, cfg.flash_filter)
+                            flash_time += time.time() - tf
+                            extras.setdefault(str(clip), {})["flash_hit"] = flash_hit
+                            if flash_hit and not cfg.flash_filter.record_only:
+                                flash_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="flash"))
+                                continue
+                        flash_pass += 1
+
+                        if cfg.ocr.enabled:
+                            tocr = time.time()
+                            ocr_hit = has_text(clip, cfg.ocr)
+                            ocr_time += time.time() - tocr
+                            extras.setdefault(str(clip), {})["ocr_hit"] = ocr_hit
+                            if ocr_hit and not cfg.ocr.record_only:
+                                ocr_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="ocr_text"))
+                                continue
+                        ocr_pass += 1
+                        q.put(clip)
+                        produced += 1
+                        if target_remaining is not None and produced >= target_remaining:
+                            q.put(sentinel)
+                            sent = True
+                            return
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Producer failed unexpectedly: %s", exc)
+            finally:
+                if not sent:
+                    q.put(sentinel)
+
+        producer = threading.Thread(target=produce, daemon=True)
+        producer.start()
+
+        batch: list[Path] = []
+        t_score = time.time()
+
+        while True:
+            item = q.get()
+            if item is sentinel:
+                break
+            batch.append(item)  # type: ignore[arg-type]
+            # 延迟构建 scorer，避免在生产者启动前就加载模型
+            if not scorers and scorer_init_error is None:
+                scorers, scorer_init_error = _build_scorers_safe()
+            step = _batch_step(scorers)
+            if len(batch) >= step:
+                if scorer_init_error:
+                    scored_results.extend(
+                        ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in batch
+                    )
+                elif scorers:
+                    scored_results.extend(run_scorers(scorers, batch, max_workers=scoring_workers))
+                else:
+                    scored_results.extend(run_scorers([], batch))
+                calibration_counter += len(batch)
+                batch = []
+
+        if batch:
+            if scorer_init_error:
+                scored_results.extend(
+                    ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in batch
+                )
+            elif scorers:
+                scored_results.extend(run_scorers(scorers, batch, max_workers=scoring_workers))
+            else:
+                scored_results.extend(run_scorers([], batch))
+            calibration_counter += len(batch)
+
+        producer.join()
+        summary["time_score"] = time.time() - t_score
+        summary["files"] = len(video_files)
+        summary["clips_after_scene"] = scene_count
+        summary["clips_after_flash"] = flash_pass
+        summary["clips_after_ocr"] = ocr_pass
+        summary["clips_scored"] = len(scored_results)
+        summary["time_scene"] = scene_time
+        summary["time_flash"] = flash_time
+        summary["time_ocr"] = ocr_time
+        results = split_failed + flash_dropped + ocr_dropped + scored_results
+
+    else:
+        # 旧的串行流程
+        # 场景切分
+        scenes_root = extract_path / "scenes"
+        scene_clips: list[Path] = []
+        split_failed = []
+        t_scene = time.time()
+        for video in tqdm(video_files, desc="Scene detect", unit="video"):
+            try:
+                spans = detect_scenes(video, cfg.splitter)
+                if cfg.splitter.cut:
+                    clips = cut_and_collect(video, spans, cfg, scenes_root)
+                    scene_clips.extend(clips)
+                    if cfg.splitter.remove_source_after_split:
+                        video.unlink(missing_ok=True)
+                else:
+                    scene_clips.append(video)
+                    extras[str(video)] = build_scene_windows(video, spans, cfg)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Scene detection failed for %s: %s", video, exc)
+                split_failed.append(ScoreResult(path=video, scores={}, keep=False, reason="split_failed"))
+            if target_remaining is not None and len(scene_clips) >= target_remaining:
+                break
+        summary["time_scene"] = time.time() - t_scene
+        summary["files"] = len(video_files)
+        summary["clips_after_scene"] = len(scene_clips)
+
+        if not scene_clips:
+            log.warning("No scene clips found in shard %s", shard)
+
+        # 闪烁过滤
+        flash_dropped = []
+        filtered_clips: list[Path] = []
+        t_flash = time.time()
+        if cfg.flash_filter.enabled and scene_clips:
+            for clip in tqdm(scene_clips, desc="Flash filter", unit="clip"):
+                hit = is_flashy(clip, cfg.flash_filter)
+                extras.setdefault(str(clip), {})["flash_hit"] = hit
+                if hit and not cfg.flash_filter.record_only:
+                    flash_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="flash"))
+                else:
+                    filtered_clips.append(clip)
+        else:
+            filtered_clips = scene_clips
+        if target_remaining is not None and len(filtered_clips) > target_remaining:
+            filtered_clips = filtered_clips[:target_remaining]
+        summary["time_flash"] = time.time() - t_flash
+        summary["clips_after_flash"] = len(filtered_clips)
+
+        # OCR 文字过滤
+        ocr_dropped = []
+        ocr_filtered: list[Path] = []
+        t_ocr = time.time()
+        if cfg.ocr.enabled and filtered_clips:
+            for clip in tqdm(filtered_clips, desc="OCR filter", unit="clip"):
+                hit = has_text(clip, cfg.ocr)
+                extras.setdefault(str(clip), {})["ocr_hit"] = hit
+                if hit and not cfg.ocr.record_only:
+                    ocr_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="ocr_text"))
+                else:
+                    ocr_filtered.append(clip)
+        else:
+            ocr_filtered = filtered_clips
+        if target_remaining is not None and len(ocr_filtered) > target_remaining:
+            ocr_filtered = ocr_filtered[:target_remaining]
+        summary["time_ocr"] = time.time() - t_ocr
+        summary["clips_after_ocr"] = len(ocr_filtered)
+
+        try:
+            scorers = build_scorers(cfg.models)
+            scorer_init_error = None
+        except Exception as exc:  # noqa: BLE001
+            scorer_init_error = exc
+            log.exception("Scorer initialization failed: %s", exc)
+            scorers = []
+        # 若校准模式启用，截断样本数量
+        if calibration_enabled and calibration_sample_size > 0:
+            limit = calibration_sample_size
+            if calibration_remaining is not None:
+                limit = max(min(calibration_remaining, calibration_sample_size), 0)
+            if len(ocr_filtered) > limit:
+                ocr_filtered = ocr_filtered[:limit]
+        t_score = time.time()
+        if scorer_init_error:
+            scored_results = [
+                ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in ocr_filtered
+            ]
+        else:
+            log.info("Scoring %d clips with %d models", len(ocr_filtered), len(scorers))
+            scored_results = run_scorers(scorers, ocr_filtered, max_workers=scoring_workers) if ocr_filtered else []
+        calibration_counter += len(ocr_filtered)
+        summary["time_score"] = time.time() - t_score
+        summary["clips_scored"] = len(ocr_filtered)
+        results = split_failed + flash_dropped + ocr_dropped + scored_results
     state["scored"] = True
     save_state(cfg.state_dir, shard, state)
 

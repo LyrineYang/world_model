@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Protocol
@@ -399,31 +400,47 @@ def build_scorers(model_cfgs: Iterable[ModelConfig]) -> List[Scorer]:
     return scorers
 
 
-def run_scorers(scorers: List[Scorer], items: List[Path]) -> List[ScoreResult]:
+def run_scorers(scorers: List[Scorer], items: List[Path], max_workers: int | None = None) -> List[ScoreResult]:
     results: List[ScoreResult] = []
     if not scorers:
         return [ScoreResult(path=p, scores={}, keep=True, reason=None) for p in items]
 
+    workers = max_workers if max_workers and max_workers > 1 else 1
+    use_parallel = workers > 1 and len(scorers) > 1
     step = _min_batch_size(scorers)
-    for batch_start in tqdm(range(0, len(items), step), desc="Scoring", unit="batch"):
-        batch = items[batch_start : batch_start + step]
-        batch_scores: Dict[str, List[float]] = {}
-        for scorer in scorers:
-            scores = scorer.score_batch(batch)
-            if len(scores) != len(batch):
-                raise ValueError(f"Scorer {scorer.name} returned {len(scores)} scores for {len(batch)} items")
-            batch_scores[scorer.name] = scores
-
-        for idx, path in enumerate(batch):
-            per_item_scores = {name: batch_scores[name][idx] for name in batch_scores}
-            has_invalid = any(v is None or (isinstance(v, float) and math.isnan(v)) for v in per_item_scores.values())
-            if has_invalid:
-                keep = False
-                reason = "scoring_error"
+    executor = ThreadPoolExecutor(max_workers=workers) if use_parallel else None
+    try:
+        for batch_start in tqdm(range(0, len(items), step), desc="Scoring", unit="batch"):
+            batch = items[batch_start : batch_start + step]
+            batch_scores: Dict[str, List[float]] = {}
+            if executor:
+                futures = {executor.submit(scorer.score_batch, batch): scorer.name for scorer in scorers}
+                for fut in as_completed(futures):
+                    name = futures[fut]
+                    scores = fut.result()
+                    if len(scores) != len(batch):
+                        raise ValueError(f"Scorer {name} returned {len(scores)} scores for {len(batch)} items")
+                    batch_scores[name] = scores
             else:
-                keep = all(per_item_scores[name] >= scorer.threshold for name, scorer in _name_map(scorers).items())
-                reason = None if keep else "score_below_threshold"
-            results.append(ScoreResult(path=path, scores=per_item_scores, keep=keep, reason=reason))
+                for scorer in scorers:
+                    scores = scorer.score_batch(batch)
+                    if len(scores) != len(batch):
+                        raise ValueError(f"Scorer {scorer.name} returned {len(scores)} scores for {len(batch)} items")
+                    batch_scores[scorer.name] = scores
+
+            for idx, path in enumerate(batch):
+                per_item_scores = {name: batch_scores[name][idx] for name in batch_scores}
+                has_invalid = any(v is None or (isinstance(v, float) and math.isnan(v)) for v in per_item_scores.values())
+                if has_invalid:
+                    keep = False
+                    reason = "scoring_error"
+                else:
+                    keep = all(per_item_scores[name] >= scorer.threshold for name, scorer in _name_map(scorers).items())
+                    reason = None if keep else "score_below_threshold"
+                results.append(ScoreResult(path=path, scores=per_item_scores, keep=keep, reason=reason))
+    finally:
+        if executor:
+            executor.shutdown(wait=True)
     return results
 
 

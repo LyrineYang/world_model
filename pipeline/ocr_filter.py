@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
@@ -33,6 +34,7 @@ def has_text(video_path: Path, cfg: OCRConfig) -> bool:
         return False
 
     ocr = _get_ocr(cfg.lang)
+    ocr_kwargs = _build_ocr_kwargs(ocr)
     vr = decord.VideoReader(str(video_path))
     total = len(vr)
     if total == 0:
@@ -42,7 +44,7 @@ def has_text(video_path: Path, cfg: OCRConfig) -> bool:
     hit = False
     for idx in range(0, total, stride):
         frame = vr[idx].asnumpy()  # RGB
-        if _text_area_ratio(frame, ocr) >= cfg.text_area_threshold:
+        if _text_area_ratio(frame, ocr, ocr_kwargs) >= cfg.text_area_threshold:
             hit = True
             break
     return hit
@@ -62,12 +64,32 @@ def _get_ocr(lang: str) -> PaddleOCR:  # type: ignore
             return PaddleOCR(use_angle_cls=False, lang=lang)
 
 
-def _text_area_ratio(frame_rgb: np.ndarray, ocr: PaddleOCR) -> float:  # type: ignore
+def _build_ocr_kwargs(ocr: PaddleOCR) -> dict[str, object]:  # type: ignore
+    try:
+        params = inspect.signature(ocr.ocr).parameters  # type: ignore[attr-defined]
+    except (TypeError, ValueError):
+        return {"det": True, "rec": False, "cls": False}
+    kwargs: dict[str, object] = {}
+    for key, value in (("det", True), ("rec", False), ("cls", False)):
+        if key in params:
+            kwargs[key] = value
+    return kwargs
+
+
+def _text_area_ratio(frame_rgb: np.ndarray, ocr: PaddleOCR, ocr_kwargs: dict[str, object]) -> float:  # type: ignore
     h, w, _ = frame_rgb.shape
     if h == 0 or w == 0:
         return 0.0
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-    result = ocr.ocr(frame_bgr, det=True, rec=False, cls=False)
+    try:
+        result = ocr.ocr(frame_bgr, **ocr_kwargs)
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, TypeError) or "Unknown argument" in str(exc):
+            log.warning("OCR call rejected kwargs %s: %s; retrying without kwargs", ocr_kwargs, exc)
+            ocr_kwargs.clear()
+            result = ocr.ocr(frame_bgr)
+        else:
+            raise
     # result: list per image -> we pass one image, so take first element
     if not result or not isinstance(result, list):
         return 0.0

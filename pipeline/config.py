@@ -53,6 +53,16 @@ class OCRConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    # 是否启用流水线流式处理（边切分/过滤边打分）
+    stream_processing: bool = True
+    # scorer 并行线程数，0 表示按模型数量自动
+    scoring_workers: int = 0
+    # 生产者-消费者队列长度，避免占用过多内存
+    queue_size: int = 16
+
+
+@dataclass
 class FFmpegConfig:
     audio_sample_rate: int = 16000
     max_width: int = 480
@@ -70,6 +80,7 @@ class Config:
     splitter: SplitterConfig
     flash_filter: FlashFilterConfig
     ocr: OCRConfig
+    runtime: RuntimeConfig
     ffmpeg: FFmpegConfig
     calibration: dict[str, Any] = field(default_factory=dict)
     limit_shards: int | None = None
@@ -162,6 +173,7 @@ def load_config(path: Path, limit_shards: int | None = None, skip_upload: bool =
         splitter=SplitterConfig(**raw.get("splitter", {})),
         flash_filter=FlashFilterConfig(**raw.get("flash_filter", {})),
         ocr=OCRConfig(**raw.get("ocr", {})),
+        runtime=RuntimeConfig(**raw.get("runtime", {})),
         ffmpeg=FFmpegConfig(**raw.get("ffmpeg", {})),
         calibration=raw.get("calibration", {}),
         limit_shards=limit_shards,
