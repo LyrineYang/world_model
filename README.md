@@ -31,6 +31,26 @@ git clone https://github.com/autonomousvision/unimatch.git unimatch
 git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
 ```
 
+### conda 环境示例（GPU，CUDA 12.1）
+```bash
+conda create -y -n world_model python=3.10
+conda activate world_model
+
+# Torch/vision CUDA 12.1
+pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+# Paddle GPU
+pip install paddlepaddle-gpu==2.6.1 -f https://www.paddlepaddle.org.cn/whl/cu121
+
+# 其余依赖
+pip install -r requirements.txt
+
+# 外部源码（如未自带）
+git clone https://github.com/QualityAssessment/DOVER.git DOVER
+git clone https://github.com/autonomousvision/unimatch.git unimatch
+git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
+```
+
 ## 配置说明（`config.yaml` 关键字段）
 示例详见 `config.example.yaml`。核心字段：
 - `source_repo` / `target_repo`：源/目标 HF 数据集
