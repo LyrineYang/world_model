@@ -23,6 +23,7 @@ flash_filter:
   brightness_delta: 60.0   # 相邻采样帧亮度跳变阈值
   max_flash_ratio: 0.2     # 超过比例则视为闪烁
   sample_stride: 5         # 采样帧间隔
+  record_only: false       # 若为 true，仅记录命中，不剔除
 
 # 阈值校准（可选）：抽样若干片段，仅落盘分布不上传
 calibration:
@@ -37,6 +38,7 @@ ocr:
   text_area_threshold: 0.01   # 文字面积占帧面积的比例阈值
   sample_stride: 10           # 每隔多少帧采样一次
   lang: ch                    # OCR 语言，常用 ch/en
+  record_only: false          # 若为 true，仅记录命中，不剔除
 
 models:
   # 基线占位符，始终返回 1.0 用于快速连通性验证

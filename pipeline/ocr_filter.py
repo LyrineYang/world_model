@@ -50,7 +50,16 @@ def has_text(video_path: Path, cfg: OCRConfig) -> bool:
 
 @lru_cache(maxsize=2)
 def _get_ocr(lang: str) -> PaddleOCR:  # type: ignore
-    return PaddleOCR(use_angle_cls=False, lang=lang, det=True, rec=False, show_log=False)
+    try:
+        # 新版本参数，显式关闭识别分支以节省开销
+        return PaddleOCR(use_angle_cls=False, lang=lang, det=True, rec=False)
+    except Exception:
+        # 兼容老版本 PaddleOCR 不支持 rec 参数的情况
+        try:
+            return PaddleOCR(use_angle_cls=False, lang=lang, det=True)
+        except Exception:
+            # 最简参数集，尽量兼容旧版
+            return PaddleOCR(use_angle_cls=False, lang=lang)
 
 
 def _text_area_ratio(frame_rgb: np.ndarray, ocr: PaddleOCR) -> float:  # type: ignore

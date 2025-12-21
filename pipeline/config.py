@@ -40,6 +40,7 @@ class FlashFilterConfig:
     brightness_delta: float = 60.0
     max_flash_ratio: float = 0.2
     sample_stride: int = 5
+    record_only: bool = False  # 若为 True，则仅记录命中，不剔除
 
 
 @dataclass
@@ -48,6 +49,7 @@ class OCRConfig:
     text_area_threshold: float = 0.02
     sample_stride: int = 10
     lang: str = "ch"
+    record_only: bool = False  # 若为 True，则仅记录命中，不剔除
 
 
 @dataclass

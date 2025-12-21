@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
+import json
 
 import pandas as pd
 import time
@@ -131,7 +132,9 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     t_flash = time.time()
     if cfg.flash_filter.enabled and scene_clips:
         for clip in tqdm(scene_clips, desc="Flash filter", unit="clip"):
-            if is_flashy(clip, cfg.flash_filter):
+            hit = is_flashy(clip, cfg.flash_filter)
+            extras.setdefault(str(clip), {})["flash_hit"] = hit
+            if hit and not cfg.flash_filter.record_only:
                 flash_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="flash"))
             else:
                 filtered_clips.append(clip)
@@ -148,7 +151,9 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     t_ocr = time.time()
     if cfg.ocr.enabled and filtered_clips:
         for clip in tqdm(filtered_clips, desc="OCR filter", unit="clip"):
-            if has_text(clip, cfg.ocr):
+            hit = has_text(clip, cfg.ocr)
+            extras.setdefault(str(clip), {})["ocr_hit"] = hit
+            if hit and not cfg.ocr.record_only:
                 ocr_dropped.append(ScoreResult(path=clip, scores={}, keep=False, reason="ocr_text"))
             else:
                 ocr_filtered.append(clip)
@@ -282,14 +287,17 @@ def build_scene_windows(video: Path, spans, cfg: Config) -> dict:
 
 
 def cleanup_shard(cfg: Config, shard: str) -> None:
-    # 清理当前分片的中间文件，减少磁盘占用
-    extract_path = cfg.extract_dir / Path(shard).stem
-    if extract_path.exists():
-        shutil.rmtree(extract_path, ignore_errors=True)
-    # 可选：下载的压缩包也可清理；如需断点再用可保留
-    archive_path = cfg.downloads_dir / shard
-    if archive_path.exists():
-        archive_path.unlink(missing_ok=True)
+    # 暂停自动删除，避免本地分片与中间文件被意外清理
+    return
+
+
+def _write_summary(path: Path, data: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to write summary to %s: %s", path, exc)
 
 
 def main() -> None:
@@ -365,12 +373,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-def _write_summary(path: Path, data: dict) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to write summary to %s: %s", path, exc)

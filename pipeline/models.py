@@ -443,7 +443,7 @@ def _sample_video_frames(video_path: Path, num_frames: int) -> List[np.ndarray]:
     if total == 0:
         return []
     indices = _uniform_indices(total, num_frames)
-    frames = [vr[idx].asnumpy() for idx in indices]
+    frames = [_frame_to_numpy(vr[idx]) for idx in indices]
     return frames
 
 
@@ -480,8 +480,25 @@ def _sample_frame_pairs(video_path: Path, num_pairs: int) -> List[tuple[np.ndarr
     for _ in range(num_pairs):
         if idx + 1 >= total:
             break
-        f0 = vr[idx].asnumpy()
-        f1 = vr[min(idx + 1, total - 1)].asnumpy()
+        f0 = _frame_to_numpy(vr[idx])
+        f1 = _frame_to_numpy(vr[min(idx + 1, total - 1)])
         pairs.append((f0, f1))
         idx += stride
     return pairs
+
+
+def _frame_to_numpy(frame) -> np.ndarray:
+    """
+    decord 默认返回 NDArray（有 asnumpy），但若桥接到 torch 会直接返回 Tensor。
+    统一转为 numpy，兼容两种情况，避免 'Tensor' object has no attribute asnumpy。
+    """
+    if hasattr(frame, "asnumpy"):
+        return frame.asnumpy()
+    try:
+        import torch
+
+        if isinstance(frame, torch.Tensor):
+            return frame.detach().cpu().numpy()
+    except Exception:
+        pass
+    return np.array(frame)
