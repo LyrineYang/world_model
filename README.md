@@ -9,6 +9,7 @@
 - Caption 生成：可配置 API（或未来替换开源模型）为保留片段生成描述
 - 多模型打分：DOVER（质量）、LAION-AES（美学）、UniMatch（运动），支持多卡并行
 - 输出：保留片段/原视频、`metadata.jsonl`，可选上传到新 HF 数据集；校准模式输出分位数
+- 分片流水：按分片顺序处理，单个分片执行“下载 → 解压 → 切分/过滤 → 打分/Caption → 落盘 → 上传”；`runtime.stream_processing=true` 时切分、过滤、打分在分片内部是流式并行的，下载完成即开始处理，处理完成即上传下一个。
 
 ## 环境要求
 - Python 3.10+
@@ -52,6 +53,17 @@ git clone https://github.com/autonomousvision/unimatch.git unimatch
 git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
 ```
 
+## 运行
+基础命令：
+```bash
+python -m pipeline.pipeline --config config.yaml
+```
+常用选项（追加在命令后）：
+- 仅处理前 N 个分片：`python -m pipeline.pipeline --config config.yaml --limit-shards 2`
+- 不上传：`python -m pipeline.pipeline --config config.yaml --skip-upload`
+- 校准模式：`python -m pipeline.pipeline --config config.yaml --calibration --sample-size 10000 --skip-upload`
+- 自定义分位：`python -m pipeline.pipeline --config config.yaml --calibration --calibration-quantiles 0.4,0.7,0.9`
+
 ## 配置说明（`config.yaml` 关键字段）
 示例详见 `config.example.yaml`，`config.test.yaml` 为最小跑通示例。
 
@@ -66,6 +78,8 @@ git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predicto
   - `stream_processing` 是否边切分边打分（默认 true）
   - `scoring_workers` scorer 并行线程数，0=按模型数自动
   - `queue_size` 切分→打分队列长度
+  - `prefetch_shards` 分片预取数量（>0 开启下载预取，下载完成即进入处理队列）
+  - `download_workers` 下载预取并发数（与 prefetch_shards 配合使用）
 - `splitter`：场景切分（阈值、最小场景长、是否物理切割、虚拟窗口长度/步长）
 - `flash_filter`：闪烁过滤（`brightness_delta`、`max_flash_ratio`、`sample_stride`、`record_only`）
 - `ocr`：文字过滤（`enabled`、`text_area_threshold`、`sample_stride`、`lang`、`use_gpu`、`record_only`）
@@ -84,6 +98,7 @@ git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predicto
   - LAION-AES 美学：`kind: laion_aes`, `device: cuda:1`
   - UniMatch 运动：`kind: unimatch_flow`, `device: cuda:0`
   - 可按机器调整 `device`、`batch_size`、`threshold`、`extra`（权重/采样）
+  - 当前示例阈值基于 ~95 条标注样本的 P50 留存（视频级约 20%）：`dover≈0.57`、`aes=5.0`、`motion≈87`。留存率过高/过低可酌情调节。
 
 ### 上传/输出
 - `upload`：HF 上传相关
@@ -94,8 +109,7 @@ git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predicto
 - 产出目录：`workdir/output/{shard}`，含 `videos/`（保留片段/转码片段）与 `metadata.jsonl`（scores、过滤记录、可选 caption）。
 
 ### 校准
-- `calibration`：`enabled`、`sample_size`、`output`、`quantiles`。开启后仅落盘分布，不上传。
-- 默认阈值（当前配置）：目标视频级留存约 20%，基于 95 条带标注验证集取近 P50 阈值：`dover≈0.57`、`aes=5.0`、`motion≈87`。若需更高精度可提升阈值，留存不足则相应降低。
+- `calibration`：`enabled` 控制校准模式，启用后只做下载/切分/过滤/打分，将打分结果写 `metadata.jsonl`，不会上传；`sample_size` 为抽样上限（到达后提前停），`output` 指定分布输出路径，`quantiles` 为分位点列表（用于报表）。
 
 ### Caption 配置（OpenRouter 示例）
 - 配置文件：根目录 `config.yaml`（可由 `config.example.yaml` 复制）中的 `caption` 段。
@@ -103,17 +117,6 @@ git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predicto
 - 提示词：`system_prompt`/`user_prompt` 默认用简洁中文描述，可按需求改写；`max_tokens`/`temperature` 控制长度与多样性。
 - 并发/鲁棒：`max_workers` 控制同时请求数量，`timeout`/`retry` 控制超时与重试。
 - 自建接口：若已有文件上传式 caption 服务，将 `provider` 设为 `api`，填充 `api_url`/`file_field`/`response_field`/`extra_fields`。
-
-## 运行
-基础命令：
-```bash
-python -m pipeline.pipeline --config config.yaml
-```
-常用选项：
-- 仅处理前 N 个分片：`--limit-shards N`
-- 不上传：`--skip-upload`
-- 校准模式：`--calibration --sample-size 10000 --skip-upload`
-- 自定义分位：`--calibration-quantiles 0.4,0.7,0.9`
 
 ## 性能与多卡建议（双 A800 80GB）
 - 模型分配：DOVER/motion→`cuda:0`，AES→`cuda:1`（示例默认如此）

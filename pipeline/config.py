@@ -85,6 +85,10 @@ class RuntimeConfig:
     scoring_workers: int = 0
     # 生产者-消费者队列长度，避免占用过多内存
     queue_size: int = 16
+    # 分片预取数量（>0 时开启下载预取，下载完成即进入处理队列）
+    prefetch_shards: int = 0
+    # 下载预取并发数
+    download_workers: int = 1
 
 
 @dataclass

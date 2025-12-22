@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import threading
 from queue import Queue
+from queue import Empty as QueueEmpty
 
 import pandas as pd
 import time
@@ -367,6 +368,30 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     return calibration_counter
 
 
+def prefetch_shard(cfg: Config, shard: str) -> None:
+    """
+    预取：仅做下载+解压，更新 state。
+    """
+    state = load_state(cfg.state_dir, shard)
+    archive_path = cfg.downloads_dir / shard
+    if not state.get("downloaded"):
+        log.info("[prefetch] Downloading shard %s", shard)
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir)
+        state["downloaded"] = True
+        save_state(cfg.state_dir, shard, state)
+    elif not archive_path.exists():
+        log.info("[prefetch] Re-downloading missing shard file %s", shard)
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir)
+        state["downloaded"] = True
+        save_state(cfg.state_dir, shard, state)
+
+    if not state.get("extracted"):
+        log.info("[prefetch] Extracting %s", archive_path.name)
+        extract_shard(archive_path, cfg.extract_dir)
+        state["extracted"] = True
+        save_state(cfg.state_dir, shard, state)
+
+
 def cut_and_collect(video: Path, spans, cfg: Config, scenes_root: Path) -> list[Path]:
     # 目前直接使用现有切分函数；spans 仅用于未来精细切分
     clips = split_video_to_scenes(video, cfg.splitter, scenes_root)
@@ -477,25 +502,23 @@ def main() -> None:
     ensure_dirs(cfg)
 
     log.info("Starting pipeline for %d shard(s)", len(cfg.shards))
-    total_calibrated = 0
-    for shard in tqdm(cfg.shards, desc="Shards", unit="shard"):
-        try:
-            calib_cfg = cfg.calibration or {}
-            remaining = None
-            if calib_cfg.get("enabled", False) and calib_cfg.get("sample_size", 0) > 0:
-                remaining = max(int(calib_cfg["sample_size"]) - total_calibrated, 0)
-            added = process_shard(cfg, shard, calibration_remaining=remaining)
-            total_calibrated += added or 0
-            # 校准模式下达到样本上限则早停
-            calib = cfg.calibration or {}
-            if calib.get("enabled", False) and calib.get("sample_size", 0) > 0:
-                if total_calibrated >= int(calib["sample_size"]):
+    if cfg.runtime.prefetch_shards > 0 and cfg.runtime.download_workers > 0:
+        total_calibrated = _run_with_prefetch(cfg)
+    else:
+        total_calibrated = 0
+        for shard in tqdm(cfg.shards, desc="Shards", unit="shard"):
+            try:
+                remaining = _calibration_remaining(cfg, total_calibrated)
+                added = process_shard(cfg, shard, calibration_remaining=remaining)
+                total_calibrated += added or 0
+                # 校准模式下达到样本上限则早停
+                if _should_stop_calibration(cfg, total_calibrated):
                     log.info("Calibration sample size reached globally (%d); stopping", total_calibrated)
                     break
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Shard %s failed: %s", shard, exc)
-            # 保留状态，用户可重试
-            continue
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Shard %s failed: %s", shard, exc)
+                # 保留状态，用户可重试
+                continue
 
     # 如果是校准模式并指定输出与分位
     calib_cfg = cfg.calibration or {}
@@ -524,6 +547,101 @@ def main() -> None:
                     log.warning("No scored entries for calibration quantiles")
             except Exception as exc:  # noqa: BLE001
                 log.warning("Failed to compute quantiles: %s", exc)
+
+
+def _calibration_remaining(cfg: Config, total_calibrated: int) -> int | None:
+    calib_cfg = cfg.calibration or {}
+    if not calib_cfg.get("enabled", False):
+        return None
+    sample_size = int(calib_cfg.get("sample_size", 0))
+    if sample_size <= 0:
+        return None
+    return max(sample_size - total_calibrated, 0)
+
+
+def _should_stop_calibration(cfg: Config, total_calibrated: int) -> bool:
+    calib = cfg.calibration or {}
+    if not calib.get("enabled", False):
+        return False
+    sample_size = int(calib.get("sample_size", 0))
+    return sample_size > 0 and total_calibrated >= sample_size
+
+
+def _run_with_prefetch(cfg: Config) -> int:
+    """
+    分片级流水：下载/解压线程预取，主线程按完成顺序处理并上传。
+    """
+    download_queue: Queue[str] = Queue()
+    ready_queue: Queue[str | object] = Queue(maxsize=max(cfg.runtime.prefetch_shards, 1))
+    stop_event = threading.Event()
+    sentinel = object()
+    total_calibrated = 0
+
+    for shard in cfg.shards:
+        download_queue.put(shard)
+
+    def downloader() -> None:
+        while not stop_event.is_set():
+            try:
+                shard = download_queue.get_nowait()
+            except QueueEmpty:
+                break
+            try:
+                prefetch_shard(cfg, shard)
+                ready_queue.put(shard)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Prefetch failed for %s: %s", shard, exc)
+                # 仍然放入队列让主线程尝试处理并记录失败
+                ready_queue.put(shard)
+            finally:
+                download_queue.task_done()
+        ready_queue.put(sentinel)
+
+    workers = max(int(cfg.runtime.download_workers), 1)
+    threads = [threading.Thread(target=downloader, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+
+    sentinels_seen = 0
+    processed = 0
+    total_shards = len(cfg.shards)
+    stopping = False  # 校准达到上限后不再处理，但继续消费队列防止阻塞
+    while sentinels_seen < workers and processed < total_shards:
+        item = ready_queue.get()
+        if item is sentinel:
+            sentinels_seen += 1
+            continue
+        shard = item  # type: ignore[assignment]
+        if stopping or stop_event.is_set():
+            # 达到校准上限后，仅消费队列，避免下载线程阻塞在 ready_queue.put
+            processed += 1
+            continue
+        try:
+            remaining = _calibration_remaining(cfg, total_calibrated)
+            added = process_shard(cfg, shard, calibration_remaining=remaining)
+            total_calibrated += added or 0
+            processed += 1
+            if _should_stop_calibration(cfg, total_calibrated):
+                stop_event.set()
+                stopping = True
+                log.info("Calibration sample size reached globally (%d); stopping", total_calibrated)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Shard %s failed: %s", shard, exc)
+            processed += 1
+            continue
+
+    # 继续消费队列直到所有下载线程发出哨兵，避免它们在队列满时阻塞
+    while sentinels_seen < workers:
+        item = ready_queue.get()
+        if item is sentinel:
+            sentinels_seen += 1
+            continue
+        processed += 1  # 对未处理的 shard 计入已消费
+
+    stop_event.set()
+    for t in threads:
+        t.join()
+    return total_calibrated
 
 
 if __name__ == "__main__":

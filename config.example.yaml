@@ -15,6 +15,8 @@ runtime:
   stream_processing: true    # 边切分边打分的流式模式
   scoring_workers: 0         # scorer 并行线程数，0=按模型数量自动
   queue_size: 16             # 生产者-消费者队列长度
+  prefetch_shards: 2         # 分片预取数量（>0 开启下载预取，下载完成即进入处理队列）
+  download_workers: 2        # 下载预取并发数
 
 # 场景切分配置
 splitter:
