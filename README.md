@@ -46,6 +46,11 @@ import onnxruntime as ort
 print("providers:", ort.get_available_providers())
 PY
 # 如果包含 CUDAExecutionProvider，则 RapidOCR 可用 GPU。
+
+# 如仓库未自带外部源码，可先 clone：
+# git clone https://github.com/QualityAssessment/DOVER.git DOVER
+# git clone https://github.com/autonomousvision/unimatch.git unimatch
+# git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
 ```
 
 > CPU-only：同第 0/1 步，torch 可用 CPU 版，跳过 onnxruntime-gpu，保持 `ocr.use_gpu: false`。
