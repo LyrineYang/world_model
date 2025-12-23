@@ -1,6 +1,6 @@
 source_repo: ONE-Lab/HQ-video-data
 target_repo: your-org/filtered-hq-video
-workdir: /data/world_model
+workdir: /scratch/ayuille1/jchen293/wcloong/video_dataset
 
 # 若分片很多可通过 shards_file 指定，每行一个文件名；如存在，则覆盖 shards 列表
 shards_file: shards_ONE-Lab_HQ-video-data.txt
@@ -14,6 +14,8 @@ runtime:
   stream_processing: true
   scoring_workers: 0
   queue_size: 16
+  prefetch_shards: 2
+  download_workers: 2
 
 splitter:
   kind: pyscenedetect
@@ -38,10 +40,11 @@ calibration:
   quantiles: [0.4, 0.7]
 
 ocr:
-  enabled: false
+  enabled: true
   text_area_threshold: 0.01
   sample_stride: 10
   lang: ch
+  use_gpu: true
   record_only: false
 
 models:
