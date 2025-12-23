@@ -32,8 +32,11 @@ def has_text(video_path: Path, cfg: OCRConfig) -> bool:
     if PaddleOCR is None or decord is None:
         log.warning("OCR skipped for %s because PaddleOCR/decord not available", video_path)
         return False
-
-    ocr = _get_ocr(cfg.lang, cfg.use_gpu)
+    try:
+        ocr = _get_ocr(cfg.lang, cfg.use_gpu)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("OCR init failed for %s: %s; skipping OCR", video_path, exc)
+        return False
     ocr_kwargs = _build_ocr_kwargs(ocr)
     vr = decord.VideoReader(str(video_path))
     total = len(vr)
@@ -52,16 +55,30 @@ def has_text(video_path: Path, cfg: OCRConfig) -> bool:
 
 @lru_cache(maxsize=4)
 def _get_ocr(lang: str, use_gpu: bool = False) -> PaddleOCR:  # type: ignore
+    """
+    兼容不同版本 PaddleOCR：仅传递构造函数支持的参数，避免 det/rec/use_gpu 报未知参数。
+    """
+    if PaddleOCR is None:  # 防御性分支
+        raise RuntimeError("PaddleOCR not available")
+
     try:
-        # 新版本参数，显式关闭识别分支以节省开销
-        return PaddleOCR(use_angle_cls=False, lang=lang, det=True, rec=False, use_gpu=use_gpu)
+        init_params = inspect.signature(PaddleOCR.__init__).parameters
     except Exception:
-        # 兼容老版本 PaddleOCR 不支持 rec 参数的情况
-        try:
-            return PaddleOCR(use_angle_cls=False, lang=lang, det=True, use_gpu=use_gpu)
-        except Exception:
-            # 最简参数集，尽量兼容旧版
-            return PaddleOCR(use_angle_cls=False, lang=lang, use_gpu=use_gpu)
+        init_params = {}
+
+    kwargs = {"use_angle_cls": False, "lang": lang}
+    for key, val in (("det", True), ("rec", False), ("use_gpu", use_gpu)):
+        if key in init_params:
+            kwargs[key] = val
+
+    try:
+        return PaddleOCR(**kwargs)
+    except Exception as exc:
+        log.warning("PaddleOCR init failed with %s; retrying with minimal args: %s", kwargs, exc)
+        # 去掉可选参数再尝试
+        for k in ("det", "rec", "use_gpu"):
+            kwargs.pop(k, None)
+        return PaddleOCR(**kwargs)
 
 
 def _build_ocr_kwargs(ocr: PaddleOCR) -> dict[str, object]:  # type: ignore

@@ -11,7 +11,7 @@ from tqdm import tqdm
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".mpeg", ".mpg"}
 
 
-def download_shard(repo_id: str, shard_name: str, target_dir: Path) -> Path:
+def download_shard(repo_id: str, shard_name: str, target_dir: Path, token: str | None = None) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     # resume_download keeps progress for large files
     local_path = hf_hub_download(
@@ -21,6 +21,7 @@ def download_shard(repo_id: str, shard_name: str, target_dir: Path) -> Path:
         local_dir=target_dir,
         local_dir_use_symlinks=False,
         resume_download=True,
+        token=token,
     )
     return Path(local_path)
 

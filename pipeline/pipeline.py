@@ -48,6 +48,10 @@ def ensure_dirs(cfg: Config) -> None:
 def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = None) -> int:
     t_start = time.time()
     state = load_state(cfg.state_dir, shard)
+    # 若已上传且非校准/跳过上传，直接跳过该 shard
+    if state.get("uploaded") and not cfg.skip_upload and not (cfg.calibration or {}).get("enabled", False):
+        log.info("Shard %s already uploaded; skipping.", shard)
+        return 0
     calibration_cfg = cfg.calibration or {}
     calibration_enabled = calibration_cfg.get("enabled", False)
     calibration_sample_size = int(calibration_cfg.get("sample_size", 10000))
@@ -74,14 +78,14 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     if not state["downloaded"]:
         t_dl = time.time()
         log.info("Downloading shard %s", shard)
-        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir)
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
         state["downloaded"] = True
         save_state(cfg.state_dir, shard, state)
         summary["time_download"] = time.time() - t_dl
     elif not archive_path.exists():
         # fallback to re-download if state says done but file missing
         log.info("Re-downloading missing shard file %s", shard)
-        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir)
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
 
     extract_path = cfg.extract_dir / Path(shard).stem
     if not state["extracted"]:
@@ -376,12 +380,12 @@ def prefetch_shard(cfg: Config, shard: str) -> None:
     archive_path = cfg.downloads_dir / shard
     if not state.get("downloaded"):
         log.info("[prefetch] Downloading shard %s", shard)
-        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir)
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
         state["downloaded"] = True
         save_state(cfg.state_dir, shard, state)
     elif not archive_path.exists():
         log.info("[prefetch] Re-downloading missing shard file %s", shard)
-        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir)
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
         state["downloaded"] = True
         save_state(cfg.state_dir, shard, state)
 
@@ -467,8 +471,26 @@ def build_scene_windows(video: Path, spans, cfg: Config) -> dict:
 
 
 def cleanup_shard(cfg: Config, shard: str) -> None:
-    # 暂停自动删除，避免本地分片与中间文件被意外清理
-    return
+    # 若未上传或未启用清理，保留本地文件
+    calib_cfg = cfg.calibration or {}
+    if cfg.skip_upload or calib_cfg.get("enabled", False):
+        return
+    if not getattr(cfg.upload, "cleanup_after_upload", False):
+        return
+
+    paths = [
+        cfg.downloads_dir / shard,
+        cfg.extract_dir / Path(shard).stem,
+        cfg.output_dir / shard,
+    ]
+    for p in paths:
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to cleanup %s: %s", p, exc)
 
 
 def _write_summary(path: Path, data: dict) -> None:
@@ -576,6 +598,13 @@ def _run_with_prefetch(cfg: Config) -> int:
     stop_event = threading.Event()
     sentinel = object()
     total_calibrated = 0
+    total_shards = len(cfg.shards)
+    if total_shards == 0:
+        return 0
+
+    progress_lock = threading.Lock()
+    prefetch_bar = tqdm(total=total_shards, desc="Prefetch (dl+extract)", position=0, leave=False)
+    process_bar = tqdm(total=total_shards, desc="Processed/uploaded", position=1, leave=False)
 
     for shard in cfg.shards:
         download_queue.put(shard)
@@ -594,6 +623,8 @@ def _run_with_prefetch(cfg: Config) -> int:
                 # 仍然放入队列让主线程尝试处理并记录失败
                 ready_queue.put(shard)
             finally:
+                with progress_lock:
+                    prefetch_bar.update(1)
                 download_queue.task_done()
         ready_queue.put(sentinel)
 
@@ -604,7 +635,6 @@ def _run_with_prefetch(cfg: Config) -> int:
 
     sentinels_seen = 0
     processed = 0
-    total_shards = len(cfg.shards)
     stopping = False  # 校准达到上限后不再处理，但继续消费队列防止阻塞
     while sentinels_seen < workers and processed < total_shards:
         item = ready_queue.get()
@@ -615,6 +645,8 @@ def _run_with_prefetch(cfg: Config) -> int:
         if stopping or stop_event.is_set():
             # 达到校准上限后，仅消费队列，避免下载线程阻塞在 ready_queue.put
             processed += 1
+            with progress_lock:
+                process_bar.update(1)
             continue
         try:
             remaining = _calibration_remaining(cfg, total_calibrated)
@@ -625,9 +657,13 @@ def _run_with_prefetch(cfg: Config) -> int:
                 stop_event.set()
                 stopping = True
                 log.info("Calibration sample size reached globally (%d); stopping", total_calibrated)
+            with progress_lock:
+                process_bar.update(1)
         except Exception as exc:  # noqa: BLE001
             log.exception("Shard %s failed: %s", shard, exc)
             processed += 1
+            with progress_lock:
+                process_bar.update(1)
             continue
 
     # 继续消费队列直到所有下载线程发出哨兵，避免它们在队列满时阻塞
@@ -637,10 +673,14 @@ def _run_with_prefetch(cfg: Config) -> int:
             sentinels_seen += 1
             continue
         processed += 1  # 对未处理的 shard 计入已消费
+        with progress_lock:
+            process_bar.update(1)
 
     stop_event.set()
     for t in threads:
         t.join()
+    prefetch_bar.close()
+    process_bar.close()
     return total_calibrated
 
 

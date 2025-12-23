@@ -21,6 +21,7 @@ class UploadConfig:
     chunk_size_mb: int = 512
     max_workers: int = 3
     resize_720p: bool = False
+    cleanup_after_upload: bool = False  # 上传成功后是否清理本地 download/extract/output 以节省磁盘
 
 
 @dataclass
@@ -86,9 +87,9 @@ class RuntimeConfig:
     # 生产者-消费者队列长度，避免占用过多内存
     queue_size: int = 16
     # 分片预取数量（>0 时开启下载预取，下载完成即进入处理队列）
-    prefetch_shards: int = 0
+    prefetch_shards: int = 2
     # 下载预取并发数
-    download_workers: int = 1
+    download_workers: int = 2
 
 
 @dataclass
@@ -103,6 +104,7 @@ class Config:
     source_repo: str
     target_repo: str
     workdir: Path
+    hf_token: str | None
     shards: List[str]
     shards_file: Path | None
     models: List[ModelConfig]
@@ -218,6 +220,7 @@ def load_config(path: Path, limit_shards: int | None = None, skip_upload: bool =
         source_repo=raw["source_repo"],
         target_repo=raw["target_repo"],
         workdir=Path(raw["workdir"]),
+        hf_token=raw.get("hf_token"),
         shards=shards,
         shards_file=sf_path if sf_path else None,
         models=models,

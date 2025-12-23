@@ -70,6 +70,7 @@ python -m pipeline.pipeline --config config.yaml
 ### 下载/输入
 - `source_repo`：源 HF 数据集（dataset）。大规模时建议本地镜像或开启缓存。
 - `workdir`：工作目录，内部自动创建 `downloads` / `extract` / `output` / `state`。
+- `hf_token`（可选）：有权限账号的 HF token。建议通过环境变量 `HF_TOKEN` 注入，或在配置中显式填写（会覆盖环境变量）。用于访问 gated/private 数据集。
 - `shards`：要处理的分片文件名列表。
 - `shards_file`（可选）：分片文件名列表路径（每行一个文件名）。分片多时优先使用，生成方式示例：`python scripts/fetch_shards_list.py --repo ONE-Lab/HQ-video-data --output shards_ONE-Lab_HQ-video-data.txt`。
 
@@ -78,8 +79,10 @@ python -m pipeline.pipeline --config config.yaml
   - `stream_processing` 是否边切分边打分（默认 true）
   - `scoring_workers` scorer 并行线程数，0=按模型数自动
   - `queue_size` 切分→打分队列长度
-  - `prefetch_shards` 分片预取数量（>0 开启下载预取，下载完成即进入处理队列）
-  - `download_workers` 下载预取并发数（与 prefetch_shards 配合使用）
+  - `prefetch_shards` 分片预取数量（默认 2，开启下载+解压预取，完成即入队处理）
+  - `download_workers` 下载预取并发数（默认 2，与 `prefetch_shards` 配合）
+  - 预取模式下会显示两条进度条：下载+解压（Prefetch）与处理/上传（Processed）
+  - 断点续跑：每个分片有独立 state（downloaded/extracted/scored/uploaded）；若某分片 `uploaded=true` 且非校准/非 `--skip-upload`，会跳过该分片
 - `splitter`：场景切分（阈值、最小场景长、是否物理切割、虚拟窗口长度/步长）
 - `flash_filter`：闪烁过滤（`brightness_delta`、`max_flash_ratio`、`sample_stride`、`record_only`）
 - `ocr`：文字过滤（`enabled`、`text_area_threshold`、`sample_stride`、`lang`、`use_gpu`、`record_only`）
@@ -106,6 +109,7 @@ python -m pipeline.pipeline --config config.yaml
   - `chunk_size_mb`：分块大小（MB）
   - `max_workers`：并发线程数
   - `resize_720p`：上传前是否转码 720p（占用更多时间但省流量）
+  - `cleanup_after_upload`：上传成功后是否删除本地该分片的 download/extract/output（默认示例启用，节省磁盘；`--skip-upload` 或校准模式下不会清理）
 - 产出目录：`workdir/output/{shard}`，含 `videos/`（保留片段/转码片段）与 `metadata.jsonl`（scores、过滤记录、可选 caption）。
 
 ### 校准

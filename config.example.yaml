@@ -1,6 +1,8 @@
 source_repo: ONE-Lab/HQ-video-data
 target_repo: your-org/filtered-hq-video
 workdir: /data/world_model
+# 可选：有权限的 HF token，建议通过环境变量 HF_TOKEN 注入；若填写则优先使用
+hf_token: null
 
 # shards_file 可选：若提供，则读取文件内的分片列表（每行一个文件名），覆盖下方 shards 列表
 shards_file: shards_ONE-Lab_HQ-video-data.txt
@@ -124,6 +126,7 @@ models:
 upload:
   chunk_size_mb: 512
   max_workers: 3
+  cleanup_after_upload: true       # 上传成功后清理 download/extract/output 中该分片，节省磁盘
 
 ffmpeg:
   audio_sample_rate: 16000

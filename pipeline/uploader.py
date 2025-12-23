@@ -12,10 +12,7 @@ def upload_shard(target_repo: str, shard: str, shard_dir: Path, cfg: UploadConfi
         folder_path=str(shard_dir),
         path_in_repo=shard,
         repo_type="dataset",
-        allow_patterns=None,
         commit_message=f"Add shard {shard}",
-        multi_commits=True,
-        run_as_future=False,
         max_workers=cfg.max_workers,
         chunk_size=cfg.chunk_size_mb * 1024 * 1024,
     )
