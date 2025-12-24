@@ -78,7 +78,8 @@ def render(state_dir: Path, interval: float) -> None:
                 finished_durations.append(max(s["finished_at"] - start_ts, 0.0))
 
         # 读取已完成分片的 summary.json，汇总耗时/clip 数（不改主流程，只读文件）
-        summaries_dir = state_dir.parent.parent / "output"
+        # output 与 state 同级目录下
+        summaries_dir = state_dir.parent / "output"
         summary_count = 0
         sum_time = 0.0
         sum_clips = 0
@@ -136,7 +137,28 @@ def render(state_dir: Path, interval: float) -> None:
                 start_ts = s.get("started_at")
                 age = format_age(now - start_ts) if start_ts else format_age(now - mtime)
                 stage = s.get("stage", "unknown")
-                print(f"- {name}: {stage}, last update {age} ago")
+                progress = s.get("progress") or {}
+                parts = []
+                if progress:
+                    vt = progress.get("videos_total")
+                    vd = progress.get("videos_done")
+                    if vt is not None:
+                        parts.append(f"videos {vd or 0}/{vt}")
+                    cq = progress.get("clips_queued")
+                    cs = progress.get("clips_scored")
+                    if cq is not None or cs is not None:
+                        parts.append(f"clips {cs or 0}/{cq or 0}")
+                    qp = progress.get("queue_pending")
+                    if qp is not None:
+                        parts.append(f"queue {qp}")
+                    lv = progress.get("last_video")
+                    if lv:
+                        parts.append(f"last: {lv}")
+                    ls = progress.get("last_step")
+                    if ls:
+                        parts.append(f"step: {ls}")
+                extra = f" | {'; '.join(parts)}" if parts else ""
+                print(f"- {name}: {stage}, last update {age} ago{extra}")
         else:
             print("no active shards.")
 

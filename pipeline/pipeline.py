@@ -54,6 +54,7 @@ def process_shard(
 ) -> int:
     t_start = time.time()
     state = load_state(cfg.state_dir, shard)
+    state_lock = threading.Lock()
     shard_tag = f"[{shard} {shard_idx}/{total_shards}]" if shard_idx and total_shards else f"[{shard}]"
     info_level = logging.DEBUG
     important_level = logging.INFO
@@ -61,6 +62,10 @@ def process_shard(
         state["stage"] = "pending"
     if "started_at" not in state:
         state["started_at"] = t_start
+
+    def _save_state_locked() -> None:
+        with state_lock:
+            save_state(cfg.state_dir, shard, state)
 
     def _info(msg: str, *args) -> None:
         log.log(info_level, msg, *args)
@@ -75,7 +80,7 @@ def process_shard(
         state.setdefault("started_at", t_start)
         if stage in {"processed", "uploaded"}:
             state["finished_at"] = now
-        save_state(cfg.state_dir, shard, state)
+        _save_state_locked()
 
     # 若已上传且非校准/跳过上传，直接跳过该 shard
     if state.get("uploaded") and not cfg.skip_upload and not (cfg.calibration or {}).get("enabled", False):
@@ -135,6 +140,31 @@ def process_shard(
     if not video_files:
         log.warning("No video files found in shard %s", shard)
 
+    progress_state = state.setdefault("progress", {})
+    progress_state.setdefault("videos_total", len(video_files))
+    progress_state.setdefault("videos_done", 0)
+    progress_state.setdefault("clips_queued", 0)
+    progress_state.setdefault("clips_scored", 0)
+    progress_state.setdefault("queue_pending", 0)
+    progress_state.setdefault("last_video", None)
+    progress_state.setdefault("last_step", "init")
+    last_progress_save = 0.0
+    clips_scored_count = int(progress_state.get("clips_scored", 0) or 0)
+    clips_queued_count = int(progress_state.get("clips_queued", 0) or 0)
+    videos_done_count = int(progress_state.get("videos_done", 0) or 0)
+
+    def _update_progress(force: bool = False, **fields) -> None:
+        nonlocal last_progress_save
+        now = time.time()
+        with state_lock:
+            progress = state.setdefault("progress", {})
+            progress.update(fields)
+            if force or now - last_progress_save >= 1.0:
+                save_state(cfg.state_dir, shard, state)
+                last_progress_save = now
+
+    _update_progress(force=True)
+
     runtime_cfg: RuntimeConfig = getattr(cfg, "runtime", RuntimeConfig())
     scoring_workers = runtime_cfg.scoring_workers if runtime_cfg.scoring_workers else max(len(cfg.models), 1)
     queue_size = max(int(runtime_cfg.queue_size), 1)
@@ -174,12 +204,18 @@ def process_shard(
         scorers: list = []
 
         def produce() -> None:
-            nonlocal scene_count, flash_pass, ocr_pass, scene_time, flash_time, ocr_time
+            nonlocal scene_count, flash_pass, ocr_pass, scene_time, flash_time, ocr_time, clips_queued_count, videos_done_count
             produced = 0
             sent = False
             try:
                 for video in video_files:
                     try:
+                        _update_progress(
+                            last_video=video.name,
+                            last_step="scene",
+                            queue_pending=q.qsize(),
+                            videos_done=videos_done_count,
+                        )
                         t0 = time.time()
                         spans = detect_scenes(video, cfg.splitter)
                         scene_time += time.time() - t0
@@ -218,10 +254,26 @@ def process_shard(
                         ocr_pass += 1
                         q.put(clip)
                         produced += 1
+                        clips_queued_count += 1
+                        _update_progress(
+                            last_video=video.name,
+                            clips_queued=clips_queued_count,
+                            queue_pending=q.qsize(),
+                            videos_done=videos_done_count,
+                            last_step="filtering",
+                        )
                         if target_remaining is not None and produced >= target_remaining:
                             q.put(sentinel)
                             sent = True
                             return
+                    videos_done_count += 1
+                    _update_progress(
+                        videos_done=videos_done_count,
+                        clips_queued=clips_queued_count,
+                        queue_pending=q.qsize(),
+                        last_video=video.name,
+                        last_step="filtering",
+                    )
             except Exception as exc:  # noqa: BLE001
                 log.exception("Producer failed unexpectedly: %s", exc)
             finally:
@@ -254,6 +306,12 @@ def process_shard(
                 else:
                     scored_results.extend(run_scorers([], batch))
                 calibration_counter += len(batch)
+                clips_scored_count += len(batch)
+                _update_progress(
+                    clips_scored=clips_scored_count,
+                    queue_pending=q.qsize(),
+                    last_step="scoring",
+                )
                 batch = []
 
         if batch:
@@ -266,6 +324,12 @@ def process_shard(
             else:
                 scored_results.extend(run_scorers([], batch))
             calibration_counter += len(batch)
+            clips_scored_count += len(batch)
+            _update_progress(
+                clips_scored=clips_scored_count,
+                queue_pending=q.qsize(),
+                last_step="scoring",
+            )
 
         producer.join()
         summary["time_score"] = time.time() - t_score
@@ -300,6 +364,14 @@ def process_shard(
             except Exception as exc:  # noqa: BLE001
                 log.warning("Scene detection failed for %s: %s", video, exc)
                 split_failed.append(ScoreResult(path=video, scores={}, keep=False, reason="split_failed"))
+            videos_done_count += 1
+            _update_progress(
+                last_video=video.name,
+                videos_done=videos_done_count,
+                clips_queued=len(scene_clips),
+                queue_pending=0,
+                last_step="scene",
+            )
             if target_remaining is not None and len(scene_clips) >= target_remaining:
                 break
         summary["time_scene"] = time.time() - t_scene
@@ -329,6 +401,12 @@ def process_shard(
             filtered_clips = filtered_clips[:target_remaining]
         summary["time_flash"] = time.time() - t_flash
         summary["clips_after_flash"] = len(filtered_clips)
+        clips_queued_count = len(filtered_clips)
+        _update_progress(
+            clips_queued=clips_queued_count,
+            queue_pending=0,
+            last_step="flash",
+        )
 
         # OCR 文字过滤
         ocr_dropped = []
@@ -348,6 +426,12 @@ def process_shard(
             ocr_filtered = ocr_filtered[:target_remaining]
         summary["time_ocr"] = time.time() - t_ocr
         summary["clips_after_ocr"] = len(ocr_filtered)
+        clips_queued_count = len(ocr_filtered)
+        _update_progress(
+            clips_queued=clips_queued_count,
+            queue_pending=0,
+            last_step="ocr",
+        )
 
         try:
             scorers = build_scorers(cfg.models)
@@ -372,6 +456,12 @@ def process_shard(
             _info("Scoring %d clips with %d models", len(ocr_filtered), len(scorers))
             scored_results = run_scorers(scorers, ocr_filtered, max_workers=scoring_workers) if ocr_filtered else []
         calibration_counter += len(ocr_filtered)
+        clips_scored_count += len(ocr_filtered)
+        _update_progress(
+            clips_scored=clips_scored_count,
+            queue_pending=0,
+            last_step="scoring",
+        )
         summary["time_score"] = time.time() - t_score
         summary["clips_scored"] = len(ocr_filtered)
         results = split_failed + flash_dropped + ocr_dropped + scored_results
@@ -387,6 +477,13 @@ def process_shard(
                 extras.setdefault(path_str, {})["caption"] = caption
         except Exception as exc:  # noqa: BLE001
             log.warning("Caption generation failed for shard %s: %s", shard, exc)
+    _update_progress(
+        force=True,
+        last_step="materializing",
+        queue_pending=0,
+        clips_scored=clips_scored_count,
+        clips_queued=clips_queued_count,
+    )
     state["scored"] = True
     _mark("materializing", scored=True)
 

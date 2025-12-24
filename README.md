@@ -67,6 +67,7 @@ python -m pipeline.pipeline --config config.yaml
 - 状态文件：`state/<shard>.json` 按阶段实时写入 `stage`（downloading/extracting/processing/materializing/uploading/processed）、`started_at`、`finished_at`，用于断点续跑/诊断。
 - 监控脚本：`python scripts/monitor.py --config config.yaml --interval 2`。会汇总 downloaded/extracted/scored/uploaded 数、阶段分布、速率、平均分片耗时，以及已完成分片的 `summary.json`（time_total、clips_scored）统计。
 - metadata 写入：每个分片处理完成后统一写 `output/<shard>/metadata.jsonl`（逐行记录 keep/reason/scores 等），视频文件仅对保留片段落盘；如全被过滤，`videos/` 可能为空但 metadata 仍存在。
+- 运行示例（请从仓库根目录或使用绝对路径）：`python /scratch/ayuille1/jchen293/wcloong/video_dataset/scripts/monitor.py --config /scratch/ayuille1/jchen293/wcloong/video_dataset/config.yaml --interval 2`。
 
 ## 配置说明（`config.yaml` 关键字段）
 示例详见 `config.example.yaml`，`config.test.yaml` 为最小跑通示例。
