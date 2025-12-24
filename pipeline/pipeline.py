@@ -45,12 +45,42 @@ def ensure_dirs(cfg: Config) -> None:
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
 
 
-def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = None) -> int:
+def process_shard(
+    cfg: Config,
+    shard: str,
+    calibration_remaining: int | None = None,
+    shard_idx: int | None = None,
+    total_shards: int | None = None,
+) -> int:
     t_start = time.time()
     state = load_state(cfg.state_dir, shard)
+    shard_tag = f"[{shard} {shard_idx}/{total_shards}]" if shard_idx and total_shards else f"[{shard}]"
+    info_level = logging.DEBUG
+    important_level = logging.INFO
+    if "stage" not in state:
+        state["stage"] = "pending"
+    if "started_at" not in state:
+        state["started_at"] = t_start
+
+    def _info(msg: str, *args) -> None:
+        log.log(info_level, msg, *args)
+
+    def _important(msg: str, *args) -> None:
+        log.log(important_level, msg, *args)
+
+    def _mark(stage: str, **fields) -> None:
+        now = time.time()
+        state.update(fields)
+        state["stage"] = stage
+        state.setdefault("started_at", t_start)
+        if stage in {"processed", "uploaded"}:
+            state["finished_at"] = now
+        save_state(cfg.state_dir, shard, state)
+
     # 若已上传且非校准/跳过上传，直接跳过该 shard
     if state.get("uploaded") and not cfg.skip_upload and not (cfg.calibration or {}).get("enabled", False):
-        log.info("Shard %s already uploaded; skipping.", shard)
+        _important("%s already uploaded; skipping.", shard_tag)
+        _mark("uploaded")
         return 0
     calibration_cfg = cfg.calibration or {}
     calibration_enabled = calibration_cfg.get("enabled", False)
@@ -77,24 +107,29 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     archive_path = cfg.downloads_dir / shard
     if not state["downloaded"]:
         t_dl = time.time()
-        log.info("Downloading shard %s", shard)
+        _info("%s downloading shard", shard_tag)
+        _mark("downloading")
         archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
         state["downloaded"] = True
-        save_state(cfg.state_dir, shard, state)
+        _mark("extracting", downloaded=True)
         summary["time_download"] = time.time() - t_dl
     elif not archive_path.exists():
         # fallback to re-download if state says done but file missing
-        log.info("Re-downloading missing shard file %s", shard)
+        _info("%s re-downloading missing shard file", shard_tag)
+        _mark("downloading")
         archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
 
     extract_path = cfg.extract_dir / Path(shard).stem
     if not state["extracted"]:
         t_ex = time.time()
-        log.info("Extracting %s to %s", archive_path.name, extract_path)
+        _info("%s extracting to %s", shard_tag, extract_path)
+        _mark("extracting")
         extract_path = extract_shard(archive_path, cfg.extract_dir)
         state["extracted"] = True
-        save_state(cfg.state_dir, shard, state)
+        _mark("processing", extracted=True, downloaded=True)
         summary["time_extract"] = time.time() - t_ex
+    elif state.get("extracted") and state.get("stage") not in {"processing", "materializing", "uploading", "uploaded", "processed"}:
+        _mark("processing", extracted=True, downloaded=True)
 
     video_files = list_video_files(extract_path, exclude_dirs={"scenes"})
     if not video_files:
@@ -195,6 +230,7 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
 
         producer = threading.Thread(target=produce, daemon=True)
         producer.start()
+        _info("%s scene/flash/OCR/score (streaming) started (%d video file(s))", shard_tag, len(video_files))
 
         batch: list[Path] = []
         t_score = time.time()
@@ -273,6 +309,8 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
         if not scene_clips:
             log.warning("No scene clips found in shard %s", shard)
 
+        _info("%s scene detection done: %d clips", shard_tag, len(scene_clips))
+
         # 闪烁过滤
         flash_dropped = []
         filtered_clips: list[Path] = []
@@ -331,7 +369,7 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
                 ScoreResult(path=p, scores={}, keep=False, reason="scorer_init_failed") for p in ocr_filtered
             ]
         else:
-            log.info("Scoring %d clips with %d models", len(ocr_filtered), len(scorers))
+            _info("Scoring %d clips with %d models", len(ocr_filtered), len(scorers))
             scored_results = run_scorers(scorers, ocr_filtered, max_workers=scoring_workers) if ocr_filtered else []
         calibration_counter += len(ocr_filtered)
         summary["time_score"] = time.time() - t_score
@@ -350,18 +388,19 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
         except Exception as exc:  # noqa: BLE001
             log.warning("Caption generation failed for shard %s: %s", shard, exc)
     state["scored"] = True
-    save_state(cfg.state_dir, shard, state)
+    _mark("materializing", scored=True)
 
-    log.info("Materializing results for %s", shard)
+    _important("%s materializing results", shard_tag)
     metadata_path = materialize_results(
         shard, results, cfg.output_dir, extras=extras, resize_720p=cfg.upload.resize_720p
     )
-    log.info("Metadata written to %s", metadata_path)
+    _important("%s metadata written to %s", shard_tag, metadata_path)
 
-    # 结束摘要：减少刷屏，提供关键计数
-    log.info(
-        "[%s] done: scenes=%d flash_pass=%d ocr_pass=%d scored=%d time=%.1fs",
-        shard,
+    summary["time_total"] = time.time() - t_start
+    _important(
+        "%s done: files=%d scenes=%d flash_pass=%d ocr_pass=%d scored=%d time=%.1fs",
+        shard_tag,
+        summary.get("files", 0),
         summary.get("clips_after_scene", 0),
         summary.get("clips_after_flash", 0),
         summary.get("clips_after_ocr", 0),
@@ -370,12 +409,16 @@ def process_shard(cfg: Config, shard: str, calibration_remaining: int | None = N
     )
 
     if calibration_enabled:
-        log.info("Calibration mode enabled; skipping upload")
+        _important("Calibration mode enabled; skipping upload")
+        _mark("processed")
     elif not cfg.skip_upload:
-        log.info("Uploading shard %s to %s", shard, cfg.target_repo)
+        _important("%s uploading to %s", shard_tag, cfg.target_repo)
+        _mark("uploading")
         upload_shard(cfg.target_repo, shard, cfg.output_dir / shard, cfg.upload)
         state["uploaded"] = True
-        save_state(cfg.state_dir, shard, state)
+        _mark("uploaded", uploaded=True)
+    else:
+        _mark("processed")
 
     cleanup_shard(cfg, shard)
     summary["time_total"] = time.time() - t_start
@@ -388,23 +431,37 @@ def prefetch_shard(cfg: Config, shard: str) -> None:
     预取：仅做下载+解压，更新 state。
     """
     state = load_state(cfg.state_dir, shard)
-    archive_path = cfg.downloads_dir / shard
-    if not state.get("downloaded"):
-        log.info("[prefetch] Downloading shard %s", shard)
-        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
-        state["downloaded"] = True
-        save_state(cfg.state_dir, shard, state)
-    elif not archive_path.exists():
-        log.info("[prefetch] Re-downloading missing shard file %s", shard)
-        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
-        state["downloaded"] = True
+    info_level = logging.DEBUG
+    if "stage" not in state:
+        state["stage"] = "pending"
+
+    def _info(msg: str, *args) -> None:
+        log.log(info_level, msg, *args)
+
+    def _mark(stage: str, **fields) -> None:
+        state.update(fields)
+        state["stage"] = stage
         save_state(cfg.state_dir, shard, state)
 
+    archive_path = cfg.downloads_dir / shard
+    if not state.get("downloaded"):
+        _info("[prefetch] Downloading shard %s", shard)
+        _mark("downloading")
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
+        state["downloaded"] = True
+        _mark("extracting", downloaded=True)
+    elif not archive_path.exists():
+        _info("[prefetch] Re-downloading missing shard file %s", shard)
+        _mark("downloading")
+        archive_path = download_shard(cfg.source_repo, shard, cfg.downloads_dir, token=cfg.hf_token)
+        state["downloaded"] = True
+        _mark("extracting", downloaded=True)
+
     if not state.get("extracted"):
-        log.info("[prefetch] Extracting %s", archive_path.name)
+        _info("[prefetch] Extracting %s", archive_path.name)
         extract_shard(archive_path, cfg.extract_dir)
         state["extracted"] = True
-        save_state(cfg.state_dir, shard, state)
+        _mark("prefetched", extracted=True, downloaded=True)
 
 
 def cut_and_collect(video: Path, spans, cfg: Config, scenes_root: Path) -> list[Path]:
@@ -516,6 +573,8 @@ def _write_summary(path: Path, data: dict) -> None:
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config), limit_shards=args.limit_shards, skip_upload=args.skip_upload)
+    info_level = logging.INFO
+    important_level = logging.INFO
     # 解析校准 CLI 参数
     if getattr(args, "calibration", False):
         cfg.calibration = cfg.calibration or {}
@@ -534,19 +593,25 @@ def main() -> None:
     cfg.calibration = calib_override
     ensure_dirs(cfg)
 
-    log.info("Starting pipeline for %d shard(s)", len(cfg.shards))
+    log.log(important_level, "Starting pipeline for %d shard(s)", len(cfg.shards))
     if cfg.runtime.prefetch_shards > 0 and cfg.runtime.download_workers > 0:
         total_calibrated = _run_with_prefetch(cfg)
     else:
         total_calibrated = 0
-        for shard in tqdm(cfg.shards, desc="Shards", unit="shard"):
+        for idx, shard in enumerate(cfg.shards, start=1):
             try:
                 remaining = _calibration_remaining(cfg, total_calibrated)
-                added = process_shard(cfg, shard, calibration_remaining=remaining)
+                added = process_shard(
+                    cfg,
+                    shard,
+                    calibration_remaining=remaining,
+                    shard_idx=idx,
+                    total_shards=len(cfg.shards),
+                )
                 total_calibrated += added or 0
                 # 校准模式下达到样本上限则早停
                 if _should_stop_calibration(cfg, total_calibrated):
-                    log.info("Calibration sample size reached globally (%d); stopping", total_calibrated)
+                    log.log(important_level, "Calibration sample size reached globally (%d); stopping", total_calibrated)
                     break
             except Exception as exc:  # noqa: BLE001
                 log.exception("Shard %s failed: %s", shard, exc)
@@ -570,12 +635,12 @@ def main() -> None:
             df_scores = df[df["scores"].notna()]
             output_path.parent.mkdir(parents=True, exist_ok=True)
             df_scores.to_parquet(output_path, index=False)
-            log.info("Calibration parquet written to %s", output_path)
+            log.log(info_level, "Calibration parquet written to %s", output_path)
             quantiles = calib_cfg.get("quantiles", [0.4, 0.7])
             try:
                 if not df_scores.empty:
                     qs = compute_quantiles(output_path, quantiles)
-                    log.info("Calibration quantiles: %s", qs)
+                    log.log(info_level, "Calibration quantiles: %s", qs)
                 else:
                     log.warning("No scored entries for calibration quantiles")
             except Exception as exc:  # noqa: BLE001
@@ -604,6 +669,7 @@ def _run_with_prefetch(cfg: Config) -> int:
     """
     分片级流水：下载/解压线程预取，主线程按完成顺序处理并上传。
     """
+    important_level = logging.INFO
     download_queue: Queue[str] = Queue()
     ready_queue: Queue[str | object] = Queue(maxsize=max(cfg.runtime.prefetch_shards, 1))
     stop_event = threading.Event()
@@ -653,6 +719,7 @@ def _run_with_prefetch(cfg: Config) -> int:
             sentinels_seen += 1
             continue
         shard = item  # type: ignore[assignment]
+        shard_idx = processed + 1
         if stopping or stop_event.is_set():
             # 达到校准上限后，仅消费队列，避免下载线程阻塞在 ready_queue.put
             processed += 1
@@ -661,13 +728,13 @@ def _run_with_prefetch(cfg: Config) -> int:
             continue
         try:
             remaining = _calibration_remaining(cfg, total_calibrated)
-            added = process_shard(cfg, shard, calibration_remaining=remaining)
+            added = process_shard(cfg, shard, calibration_remaining=remaining, shard_idx=shard_idx, total_shards=total_shards)
             total_calibrated += added or 0
             processed += 1
             if _should_stop_calibration(cfg, total_calibrated):
                 stop_event.set()
                 stopping = True
-                log.info("Calibration sample size reached globally (%d); stopping", total_calibrated)
+                log.log(important_level, "Calibration sample size reached globally (%d); stopping", total_calibrated)
             with progress_lock:
                 process_bar.update(1)
         except Exception as exc:  # noqa: BLE001

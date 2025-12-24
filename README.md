@@ -40,6 +40,9 @@ pip install -e ./unimatch
 git clone https://github.com/QualityAssessment/DOVER.git DOVER
 git clone https://github.com/autonomousvision/unimatch.git unimatch
 git clone https://github.com/LAION-AI/aesthetic-predictor.git aesthetic-predictor
+
+# 必备权重下载（请主动执行）
+bash scripts/download_unimatch_weights.sh  # UniMatch 运动模型权重
 ```
 
 权重下载
