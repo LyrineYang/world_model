@@ -31,6 +31,8 @@ class SceneSpan:
 def detect_scenes(video_path: Path, cfg: SplitterConfig) -> List[SceneSpan]:
     if cfg.kind == "transnet":
         return detect_scenes_transnet(video_path, cfg)
+    if cfg.kind == "transnet_dali":
+        return detect_scenes_transnet_dali(video_path, cfg)
     video = open_video(str(video_path))
     manager = SceneManager()
     manager.add_detector(
@@ -76,6 +78,17 @@ def _maybe_download_weight(cfg: SplitterConfig, base_dir: Path) -> Path | None:
         if path.exists():
             return path
     if not cfg.hf_repo_id or not cfg.hf_filename:
+        # 尝试从已安装的 transnet 包查找权重
+        for mod_name in ("transnetv2_pytorch", "transnetv2"):
+            try:
+                mod = __import__(mod_name, fromlist=["__file__"])
+                base = Path(mod.__file__).resolve().parent
+                for p in list(base.glob("*.pth")) + list((base / "weights").glob("*.pth")):
+                    if p.exists():
+                        log.info("Found TransNetV2 weight bundled in %s: %s", mod_name, p)
+                        return p
+            except Exception:
+                continue
         return None
     try:
         from huggingface_hub import hf_hub_download  # type: ignore
@@ -260,6 +273,36 @@ def detect_scenes_transnet(video_path: Path, cfg: SplitterConfig) -> List[SceneS
         total_frames=total_frames,
     )
     return spans
+
+
+def detect_scenes_transnet_dali(video_path: Path, cfg: SplitterConfig) -> List[SceneSpan]:
+    """
+    DALI + TransNetV2 版切分，需 nvidia-dali-cudaXX。
+    """
+    try:
+        from modules.splitters.transnet_dali import DaliTransNetSplitter
+    except Exception as exc:  # noqa: BLE001
+        log.warning("DALI splitter unavailable (%s); falling back to PySceneDetect for %s", exc, video_path.name)
+        return detect_scenes(video_path, SplitterConfig(kind="pyscenedetect", threshold=cfg.threshold, min_scene_len=cfg.min_scene_len))
+
+    # 优先尝试使用同样的 HF 下载逻辑
+    weight_path = _maybe_download_weight(cfg, video_path.parent)
+    if not weight_path and not cfg.hf_repo_id:
+        log.warning("No TransNetV2 weight provided; falling back to PySceneDetect for %s", video_path.name)
+        return detect_scenes(video_path, SplitterConfig(kind="pyscenedetect", threshold=cfg.threshold, min_scene_len=cfg.min_scene_len))
+
+    splitter = DaliTransNetSplitter(
+        device=cfg.device,
+        threshold=cfg.transnet_threshold or cfg.threshold,
+        batch_size=cfg.batch_size,
+        stride_frames=cfg.stride_frames,
+        resize_hw=(27, 48),
+        weight_path=str(weight_path) if weight_path else cfg.weight_path,
+        hf_repo_id=cfg.hf_repo_id,
+        hf_filename=cfg.hf_filename,
+    )
+    spans_float = splitter.detect_scenes(str(video_path))
+    return [SceneSpan(start=s, end=e) for s, e in spans_float]
 
 
 def cut_scenes(video_path: Path, spans: List[SceneSpan], out_dir: Path) -> List[Path]:

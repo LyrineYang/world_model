@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 from collections import Counter
 from datetime import datetime
@@ -12,13 +13,38 @@ from typing import Dict, List, Tuple
 import yaml
 
 
-def load_workdir(config_path: Path) -> Path:
+def load_config(config_path: Path) -> Dict:
     with config_path.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+        return yaml.safe_load(f) or {}
+
+
+def load_workdir(config_path: Path) -> Path:
+    raw = load_config(config_path)
     workdir = raw.get("workdir")
     if not workdir:
         raise ValueError(f"workdir missing in {config_path}")
     return Path(workdir).expanduser()
+
+
+def load_shards(config_path: Path) -> List[str]:
+    raw = load_config(config_path)
+    shards: List[str] = []
+    shards_file = raw.get("shards_file")
+    base_dir = config_path.parent
+    if shards_file:
+        sf_path = Path(shards_file)
+        if not sf_path.is_absolute():
+            sf_path = base_dir / sf_path
+        if sf_path.exists():
+            with sf_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    shards.append(line)
+    else:
+        shards = list(raw.get("shards", []))
+    return shards
 
 
 def load_states(state_dir: Path) -> List[Tuple[str, Dict, float]]:
@@ -42,7 +68,44 @@ def format_age(seconds: float) -> str:
     return f"{seconds/3600:.1f}h"
 
 
-def render(state_dir: Path, interval: float) -> None:
+def get_load_avg() -> Tuple[float, float, float] | None:
+    try:
+        return os.getloadavg()
+    except Exception:
+        return None
+
+
+def get_gpu_stats() -> List[Dict[str, float]]:
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=2)
+    except Exception:
+        return []
+    stats: List[Dict[str, float]] = []
+    for line in proc.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 5:
+            continue
+        try:
+            stats.append(
+                {
+                    "index": float(parts[0]),
+                    "mem_used": float(parts[1]),
+                    "mem_total": float(parts[2]),
+                    "util": float(parts[3]),
+                    "power": float(parts[4]),
+                }
+            )
+        except Exception:
+            continue
+    return stats
+
+
+def render(state_dir: Path, interval: float, config_shards: List[Tuple[Path, List[str]]] | None = None) -> None:
     prev_scored = None
     prev_uploaded = None
     prev_ts = None
@@ -52,6 +115,7 @@ def render(state_dir: Path, interval: float) -> None:
     while True:
         now = time.time()
         states = load_states(state_dir)
+        states_map: Dict[str, Tuple[Dict, float]] = {name: (s, mtime) for name, s, mtime in states}
         total = len(states)
         downloaded = sum(1 for _, s, _ in states if s.get("downloaded"))
         extracted = sum(1 for _, s, _ in states if s.get("extracted"))
@@ -105,6 +169,22 @@ def render(state_dir: Path, interval: float) -> None:
         print("=== Shard Monitor (refresh {:.1f}s) ===".format(interval))
         print(f"state dir: {state_dir}")
         print(f"total shards: {total}")
+        load_avg = get_load_avg()
+        if load_avg:
+            print("cpu load avg (1/5/15m): {:.1f} / {:.1f} / {:.1f}".format(*load_avg))
+        gpu_stats = get_gpu_stats()
+        if gpu_stats:
+            gpu_str = "; ".join(
+                "gpu{idx}: {util:.0f}% {mem:.0f}/{mem_total:.0f}MiB {power:.0f}W".format(
+                    idx=int(s["index"]),
+                    util=s["util"],
+                    mem=s["mem_used"],
+                    mem_total=s["mem_total"],
+                    power=s["power"],
+                )
+                for s in gpu_stats
+            )
+            print(f"gpus: {gpu_str}")
         print(
             "downloaded {}/{} | extracted {}/{} | scored {}/{} | uploaded {}/{}".format(
                 downloaded, total, extracted, total, scored, total, uploaded, total
@@ -124,6 +204,49 @@ def render(state_dir: Path, interval: float) -> None:
             avg_time = (sum_time / summary_count) / 60
             clips_str = f"{sum_clips} clips" if sum_clips else "-"
             print(f"summary avg time: {avg_time:.1f} min over {summary_count} shard(s); total clips scored: {clips_str}")
+
+        if config_shards:
+            print("per-config (8-proc view):")
+            for cfg_path, shards in config_shards:
+                if not shards:
+                    print(f"- {cfg_path.name}: no shard list")
+                    continue
+                d = sum(1 for sh in shards if states_map.get(sh, ({}, 0.0))[0].get("downloaded"))
+                e = sum(1 for sh in shards if states_map.get(sh, ({}, 0.0))[0].get("extracted"))
+                sc = sum(1 for sh in shards if states_map.get(sh, ({}, 0.0))[0].get("scored"))
+                up = sum(1 for sh in shards if states_map.get(sh, ({}, 0.0))[0].get("uploaded"))
+                active = [
+                    (sh, states_map.get(sh)[0], states_map.get(sh)[1])
+                    for sh in shards
+                    if sh in states_map
+                    and not states_map[sh][0].get("uploaded")
+                    and states_map[sh][0].get("stage") not in done_stages
+                ]
+                active_str = "idle"
+                if active:
+                    # oldest first
+                    sh, s, mtime = sorted(active, key=lambda x: x[2])[0]
+                    start_ts = s.get("started_at")
+                    age = format_age(now - start_ts) if start_ts else format_age(now - mtime)
+                    stage = s.get("stage", "unknown")
+                    progress = s.get("progress") or {}
+                    parts = []
+                    vt = progress.get("videos_total")
+                    vd = progress.get("videos_done")
+                    if vt is not None:
+                        parts.append(f"videos {vd or 0}/{vt}")
+                    cq = progress.get("clips_queued")
+                    cs = progress.get("clips_scored")
+                    if cq is not None or cs is not None:
+                        parts.append(f"clips {cs or 0}/{cq or 0}")
+                    qp = progress.get("queue_pending")
+                    if qp is not None:
+                        parts.append(f"queue {qp}")
+                    lv = progress.get("last_video")
+                    if lv:
+                        parts.append(f"last {lv}")
+                    active_str = f"{sh}: {stage}, {age}" + (f" | {'; '.join(parts)}" if parts else "")
+                print(f"- {cfg_path.name}: {d}/{len(shards)} dl, {e} ext, {sc} sc, {up} up | {active_str}")
 
         active = [
             (name, s, mtime)
@@ -168,19 +291,33 @@ def render(state_dir: Path, interval: float) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lightweight shard monitor using state/*.json")
-    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml (default: config.yaml)")
+    parser.add_argument(
+        "--config",
+        nargs="+",
+        default=["config.yaml"],
+        help="One or more config.yaml paths (default: config.yaml). Used to show per-config shard progress.",
+    )
     parser.add_argument("--interval", type=float, default=2.0, help="Refresh interval in seconds (default: 2)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config_path = Path(args.config)
-    workdir = load_workdir(config_path)
+    config_paths = [Path(p) for p in args.config]
+    if not config_paths:
+        raise ValueError("at least one --config is required")
+    workdir = load_workdir(config_paths[0])
+    config_shards: List[Tuple[Path, List[str]]] = []
+    for cp in config_paths:
+        try:
+            shards = load_shards(cp)
+        except Exception:
+            shards = []
+        config_shards.append((cp, shards))
     state_dir = workdir / "state"
     if not state_dir.exists():
         raise FileNotFoundError(f"state dir not found: {state_dir}")
-    render(state_dir, args.interval)
+    render(state_dir, args.interval, config_shards=config_shards)
 
 
 if __name__ == "__main__":

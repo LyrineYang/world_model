@@ -18,7 +18,7 @@ runtime:
   download_workers: 2
 
 splitter:
-  kind: transnet_dali
+  kind: pyscenedetect
   device: cuda:0
   batch_size: 32
   chunk_size_frames: 4000

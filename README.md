@@ -28,8 +28,8 @@ pip install -r requirements.txt -c constraints.txt
 # 2) 安装匹配硬件的 torch/torchvision（cu121 轮子对 CUDA 12.x 驱动可用）
 pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 
-# 2.1 可选：GPU 场景切分（TransNetV2 + decord，提升切分吞吐）
-pip install decord-cu121 transnetv2-pytorch huggingface_hub
+# 2.1 可选：GPU 场景切分（TransNetV2 + DALI，提升切分吞吐）
+pip install nvidia-dali-cuda120 transnetv2-pytorch huggingface_hub
 
 # 3) OCR 默认走 CPU，无需安装 onnxruntime-gpu；config 中保持 ocr.use_gpu: false
 
@@ -92,8 +92,9 @@ python -m pipeline.pipeline --config config.yaml
   - 预取模式下会显示两条进度条：下载+解压（Prefetch）与处理/上传（Processed）
   - 断点续跑：每个分片有独立 state（downloaded/extracted/scored/uploaded）；若某分片 `uploaded=true` 且非校准/非 `--skip-upload`，会跳过该分片
 - `splitter`：场景切分
-  - `kind: pyscenedetect`（默认）：`threshold`、`min_scene_len` 控制颗粒度；`cut` 控制是否物理切割，`window_len_frames`/`window_stride_frames` 控制虚拟窗口。
-  - `kind: transnet`（GPU 可选）：`device`（如 cuda:0）、`batch_size`（TransNet 推理批次）、`chunk_size_frames`（分块防 OOM，默认 4000）、`stride_frames`（抽帧步长，>1 更快但精度降）、`transnet_threshold`（边界阈值），`weight_path` 或 `hf_repo_id`+`hf_filename` 自动拉权重。依赖 decord CUDA 版 + TransNetV2（见上方安装）。
+  - `kind: transnet_dali`（默认）：DALI GPU 解码 + TransNetV2，`device`（如 cuda:0）、`batch_size`（推理批次）、`stride_frames`（抽帧步长，>1 更快但精度降）、`transnet_threshold`（边界阈值），可选 `weight_path`（本地权重）。依赖 nvidia-dali-cuda120 + TransNetV2。
+  - `kind: transnet`（备选）：decord GPU 解码 + TransNetV2（需 decord CUDA 版），参数同上。
+  - `kind: pyscenedetect`：`threshold`、`min_scene_len` 控制颗粒度；`cut` 控制是否物理切割，`window_len_frames`/`window_stride_frames` 控制虚拟窗口。
 - `flash_filter`：闪烁过滤（`brightness_delta`、`max_flash_ratio`、`sample_stride`、`record_only`）
 - `ocr`：文字过滤（`enabled`、`text_area_threshold`、`sample_stride`、`lang`、`use_gpu`、`record_only`）
 
@@ -138,7 +139,7 @@ python -m pipeline.pipeline --config config.yaml
 - `scoring_workers=0` 自动按模型数并行；如需限速可设为 1/2
 - OCR：RapidOCR 默认走 CPU；如安装了 onnxruntime-gpu 且想用 GPU，可设 `ocr.use_gpu: true`。解码占用高时可增大 `ocr.sample_stride`。
 - 闪烁过滤：误杀多可提高 `brightness_delta` 或增大 `max_flash_ratio`；漏检则反向调整
-- GPU 场景切分（TransNetV2，可选）：在 H100 80GB 上可设 `splitter.kind=transnet`、`device=cuda:0`、`batch_size` 32–64、`chunk_size_frames` 4000、`stride_frames` 1–2，结合 `queue_size=32` 以上保证 scorer 吃满；若切分仍成瓶颈，可将 `transnet_threshold` 提高或 `stride_frames` 增大以减少切片数。
+- GPU 场景切分（TransNetV2，可选）：在 H100 80GB 上可设 `splitter.kind=transnet_dali`、`device=cuda:0`、`batch_size` 32–64、`stride_frames` 1–2，结合 `queue_size>=48` 保证 scorer 吃满；若切分仍成瓶颈，可将 `transnet_threshold` 提高或 `stride_frames` 增大以减少切片数。
 
 ## 产出
 - 处理后片段或原视频：`workdir/output/{shard}/videos/`
