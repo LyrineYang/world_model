@@ -105,7 +105,12 @@ def get_gpu_stats() -> List[Dict[str, float]]:
     return stats
 
 
-def render(state_dir: Path, interval: float, config_shards: List[Tuple[Path, List[str]]] | None = None) -> None:
+def render(
+    state_dir: Path,
+    interval: float,
+    config_shards: List[Tuple[Path, List[str]]] | None = None,
+    filter_to_config: bool = False,
+) -> None:
     prev_scored = None
     prev_uploaded = None
     prev_ts = None
@@ -115,6 +120,9 @@ def render(state_dir: Path, interval: float, config_shards: List[Tuple[Path, Lis
     while True:
         now = time.time()
         states = load_states(state_dir)
+        if config_shards and filter_to_config:
+            allowed = {sh for _, lst in config_shards for sh in lst}
+            states = [(n, s, m) for n, s, m in states if n in allowed]
         states_map: Dict[str, Tuple[Dict, float]] = {name: (s, mtime) for name, s, mtime in states}
         total = len(states)
         downloaded = sum(1 for _, s, _ in states if s.get("downloaded"))
@@ -298,6 +306,11 @@ def parse_args() -> argparse.Namespace:
         help="One or more config.yaml paths (default: config.yaml). Used to show per-config shard progress.",
     )
     parser.add_argument("--interval", type=float, default=2.0, help="Refresh interval in seconds (default: 2)")
+    parser.add_argument(
+        "--only-config-shards",
+        action="store_true",
+        help="Only show shards listed in the provided configs (hide stale/other shards in state dir).",
+    )
     return parser.parse_args()
 
 
@@ -317,7 +330,7 @@ def main() -> None:
     state_dir = workdir / "state"
     if not state_dir.exists():
         raise FileNotFoundError(f"state dir not found: {state_dir}")
-    render(state_dir, args.interval, config_shards=config_shards)
+    render(state_dir, args.interval, config_shards=config_shards, filter_to_config=args.only_config_shards)
 
 
 if __name__ == "__main__":
