@@ -16,6 +16,16 @@ from typing import Dict, List
 import yaml
 from huggingface_hub import HfApi
 
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None  # type: ignore
+
+try:
+    import pandas as pd
+except Exception:
+    pd = None  # type: ignore
+
 
 def load_yaml(path: Path) -> Dict:
     with path.open("r", encoding="utf-8") as f:
@@ -46,18 +56,46 @@ def save_state(state_dir: Path, shard: str, state: Dict) -> None:
     jf.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def resolve_config(path_str: str) -> Path:
+    path = Path(path_str)
+    if path.exists():
+        return path
+    alt = Path("configs") / path_str
+    if alt.exists():
+        return alt
+    raise FileNotFoundError(f"config not found: {path_str} (also tried configs/{path_str})")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Upload existing shard outputs only.")
-    p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    p.add_argument("--config", default="config.yaml", help="Path to config.yaml (tries configs/ if not found)")
     p.add_argument("--shards-file", help="Optional shards file; default from config.yaml")
     p.add_argument("--workdir", help="Override workdir; default from config.yaml")
     p.add_argument("--state-dir", help="Override state dir; default <workdir>/state")
     p.add_argument("--output-dir", help="Override output dir; default <workdir>/output")
     p.add_argument("--target-repo", help="Override target repo; default from config.yaml")
     p.add_argument("--force", action="store_true", help="Upload even if state says uploaded")
+    p.add_argument(
+        "--manifest",
+        action="store_true",
+        default=True,
+        help="Write per-shard manifest parquet (videos and sizes) into shard dir before upload (default: on)",
+    )
+    p.add_argument(
+        "--no-manifest",
+        action="store_false",
+        dest="manifest",
+        help="Disable manifest generation",
+    )
+    p.add_argument(
+        "--manifest-glob",
+        default="*.mp4,*.mkv,*.avi,*.mov,*.webm",
+        help="Comma-separated glob patterns for videos to include in manifest",
+    )
     args = p.parse_args()
 
-    cfg = load_yaml(Path(args.config))
+    cfg_path = resolve_config(args.config)
+    cfg = load_yaml(cfg_path)
     workdir = Path(args.workdir or cfg.get("workdir") or ".")
     shards_file = Path(args.shards_file or cfg.get("shards_file") or "shards.txt")
     state_dir = Path(args.state_dir or workdir / "state")
@@ -74,10 +112,13 @@ def main() -> None:
     shards = load_shards(shards_file)
     api = HfApi()
 
+    patterns = [p.strip() for p in args.manifest_glob.split(",") if p.strip()]
+
     uploaded = 0
     skipped = 0
     missing = 0
-    for shard in shards:
+    iterator = tqdm(shards, desc="shards") if tqdm else shards
+    for shard in iterator:
         shard_dir = output_dir / shard
         if not shard_dir.exists():
             missing += 1
@@ -88,6 +129,21 @@ def main() -> None:
             skipped += 1
             print(f"[skip uploaded] {shard}")
             continue
+        # manifest
+        if args.manifest:
+            if pd is None:
+                print(f"[warn] pandas not available, skip manifest for {shard}")
+            else:
+                rows = []
+                for pat in patterns:
+                    for f in shard_dir.rglob(pat):
+                        if f.is_file():
+                            rows.append({"path": f.relative_to(shard_dir).as_posix(), "bytes": f.stat().st_size})
+                if rows:
+                    df = pd.DataFrame(rows)
+                    (shard_dir / "manifest.parquet").unlink(missing_ok=True)
+                    df.to_parquet(shard_dir / "manifest.parquet", index=False)
+                    print(f"[manifest] {shard}: {len(rows)} files")
         print(f"[upload] {shard} -> {target_repo}")
         api.upload_folder(
             repo_id=target_repo,
