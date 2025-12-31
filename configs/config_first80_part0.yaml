@@ -1,0 +1,109 @@
+source_repo: ONE-Lab/HQ-video-data
+target_repo: ONE-Lab/Filtered-HQ-video-data
+workdir: /scratch/ayuille1/jchen293/wcloong/video_dataset
+
+# 若分片很多可通过 shards_file 指定，每行一个文件名；如存在，则覆盖 shards 列表
+# 相对路径以本文件所在目录为基准
+shards_file: ../shard_splits_first80/first80_part0.txt
+
+# 待处理的压缩包文件名（若未使用 shards_file 时生效，示例保留）
+shards:
+  - HQ-video-data-00001.zip
+  - HQ-video-data-00002.zip
+
+runtime:
+  stream_processing: true
+  scoring_workers: 4
+  queue_size: 128
+  prefetch_shards: 2
+  download_workers: 2
+
+splitter:
+  kind: pyscenedetect
+  device: cuda:0
+  batch_size: 32
+  chunk_size_frames: 4000
+  stride_frames: 1
+  transnet_threshold: 0.5
+  weight_path:
+  hf_repo_id: Sn4kehead/TransNetV2
+  hf_filename: transnetv2-pytorch-weights.pth
+  threshold: 27.0          # 备用：pyscenedetect 模式下使用
+  min_scene_len: 16        # 备用：pyscenedetect 模式下使用
+  remove_source_after_split: false
+  cut: false
+  window_len_frames: 121
+  window_stride_frames: 60
+
+flash_filter:
+  enabled: false
+  brightness_delta: 60.0
+  max_flash_ratio: 0.2
+  sample_stride: 5
+  record_only: false
+
+calibration:
+  enabled: false
+  sample_size: 10000
+  output: calibration_meta.parquet
+  quantiles: [0.4, 0.7]
+
+ocr:
+  enabled: false
+  text_area_threshold: 0.01
+  sample_stride: 10
+  lang: ch
+  use_gpu: true
+  record_only: false
+
+models:
+  - name: sanity
+    kind: dummy
+    threshold: 0.0
+    device: cpu
+    batch_size: 8
+  - name: dover
+    kind: dover
+    threshold: 0.57
+    device: cuda:0
+    batch_size: 48
+    repo_path: ./DOVER
+    config_path: dover.yml
+    weight_path: pretrained_weights/DOVER.pth
+    data_key: val-l1080p
+    output: fused
+  - name: aes
+    kind: laion_aes
+    threshold: 5.0
+    device: cuda:0
+    batch_size: 256
+    clip_model: ViT-L-14
+    pretrained: openai
+    weight_path: aesthetic-predictor/sa_0_4_vit_l_14_linear.pth
+    num_frames: 8
+  - name: motion
+    kind: unimatch_flow
+    threshold: 87.0
+    device: cuda:0
+    batch_size: 16
+    repo_path: ./unimatch
+    weight_path: pretrained/gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth
+    num_pairs: 3
+    resize: [320, 576]
+    padding_factor: 16
+    num_scales: 1
+    upsample_factor: 8
+    attn_splits_list: [2]
+    corr_radius_list: [-1]
+    prop_radius_list: [-1]
+    num_reg_refine: 1
+
+upload:
+  chunk_size_mb: 512
+  max_workers: 3
+  resize_720p: false
+
+ffmpeg:
+  audio_sample_rate: 16000
+  max_width: 480
+  max_height: 360

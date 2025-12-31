@@ -1,0 +1,135 @@
+source_repo: ONE-Lab/HQ-video-data
+target_repo: your-org/filtered-hq-video
+workdir: /data/world_model
+# 可选：有权限的 HF token，建议通过环境变量 HF_TOKEN 注入；若填写则优先使用
+hf_token: null
+
+# shards_file 可选：若提供，则读取文件内的分片列表（每行一个文件名），覆盖下方 shards 列表
+# 相对路径以本文件所在目录为基准
+shards_file: ../shards_ONE-Lab_HQ-video-data.txt
+
+# 待处理的压缩包文件名（示例），以 50GB 压缩包为粒度
+shards:
+  - HQ-video-data-00001.zip
+  - HQ-video-data-00002.zip
+
+# 运行与并行配置（默认双卡 A800）
+runtime:
+  stream_processing: true    # 边切分边打分的流式模式
+  scoring_workers: 0         # scorer 并行线程数，0=按模型数量自动
+  queue_size: 16             # 生产者-消费者队列长度
+  prefetch_shards: 2         # 分片预取数量（>0 开启下载预取，下载完成即进入处理队列）
+  download_workers: 2        # 下载预取并发数
+
+# 场景切分配置
+splitter:
+  kind: pyscenedetect
+  threshold: 27.0       # AdaptiveDetector 阈值
+  min_scene_len: 16     # 帧数，约 0.5s（30fps 场景）
+  remove_source_after_split: false  # 若磁盘紧张可设为 true（会删除原视频，仅保留切分片段）
+  cut: false            # 默认不物理切割，保留原视频
+  window_len_frames: 121
+  window_stride_frames: 60
+
+# 闪烁过滤（Flash Filter）
+flash_filter:
+  enabled: true
+  brightness_delta: 60.0   # 相邻采样帧亮度跳变阈值
+  max_flash_ratio: 0.2     # 超过比例则视为闪烁
+  sample_stride: 5         # 采样帧间隔
+  record_only: false       # 若为 true，仅记录命中，不剔除
+
+# 阈值校准（可选）：抽样若干片段，仅落盘分布不上传
+calibration:
+  enabled: false            # 开启校准模式：不会上传，仅保存分布
+  sample_size: 10000        # 抽样评分的片段数量上限
+  output: calibration_meta.parquet  # 分布输出路径
+  quantiles: [0.4, 0.7]     # 计算的分位点
+
+# OCR 文字过滤（使用 RapidOCR 检测文字占比，超过阈值丢弃）
+ocr:
+  enabled: false
+  text_area_threshold: 0.01   # 文字面积占帧面积的比例阈值
+  sample_stride: 10           # 每隔多少帧采样一次
+  lang: ch                    # OCR 语言，常用 ch/en
+  use_gpu: false              # RapidOCR 默认 CPU；若已装 onnxruntime-gpu 可设为 true
+  record_only: false          # 若为 true，仅记录命中，不剔除
+
+# Caption 生成（API 示例）
+caption:
+  enabled: false
+  provider: openrouter                    # openrouter (OpenAI 兼容) 或 api(自建文件上传)
+  api_url: https://openrouter.ai/api/v1/chat/completions
+  api_key: null                           # 从环境注入更安全，例如 OPENROUTER_API_KEY
+  api_key_header: Authorization
+  model: gpt-4o                            # 默认使用支持视觉的模型
+  system_prompt: 你是视频内容描述助手，用简洁中文总结视频。
+  user_prompt: 为这段视频生成一句中文描述（不超过30字）。如有多场景请概括主要内容。
+  max_tokens: 120
+  temperature: 0.2
+  timeout: 60
+  max_workers: 2                          # 同时请求数量
+  retry: 1                                # 失败重试次数
+  include_image: true                     # 尝试抽帧并附带给模型
+  image_max_side: 512
+  file_field: file                        # provider=api 时的上传字段名
+  response_field: caption                 # provider=api 时的响应字段
+  extra_fields: {}                        # provider=api 时的额外表单字段
+
+models:
+  # 基线占位符，始终返回 1.0 用于快速连通性验证
+  - name: sanity
+    kind: dummy
+    threshold: 0.0
+    device: cpu            # 按你的机器调整 device
+    batch_size: 8
+  # DOVER 视频质量：fused 输出约在 0~1，分支分数接近 N(0,1)；阈值需结合校准分布调整
+  - name: dover
+    kind: dover
+    threshold: 0.57         # 基于 P50 左右的留存估计，可按实际校准调整
+    device: cuda:0
+    batch_size: 8
+    # Dover 额外参数（可选）
+    repo_path: ./DOVER
+    config_path: dover.yml          # 相对 repo_path
+    weight_path: pretrained_weights/DOVER.pth
+    data_key: val-l1080p            # 使用的采样配置
+    output: fused                   # fused | technical | aesthetic
+  # LAION-AES 美学评分：输出通常在 ~0~1 区间，阈值需结合校准分布调整
+  - name: aes
+    kind: laion_aes
+    threshold: 5.0
+    device: cuda:1
+    batch_size: 32
+    # AES 额外参数（可选）
+    clip_model: ViT-L-14
+    pretrained: openai
+    weight_path: aesthetic-predictor/sa_0_4_vit_l_14_linear.pth
+    num_frames: 8
+  # UniMatch 光流（运动过滤），用于剔除低运动/PPT
+  - name: motion
+    kind: unimatch_flow
+    threshold: 87.0          # 基于 P50 左右的留存估计，可按实际校准调整
+    device: cuda:0
+    batch_size: 1
+    repo_path: ./unimatch
+    weight_path: pretrained/gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth
+    num_pairs: 3
+    resize: [320, 576]      # 可选，下采样以减算力；删除则用原分辨率
+    padding_factor: 16
+    num_scales: 1
+    upsample_factor: 8
+    attn_splits_list: [2]
+    corr_radius_list: [-1]
+    prop_radius_list: [-1]
+    num_reg_refine: 1
+
+upload:
+  chunk_size_mb: 512
+  max_workers: 3
+  cleanup_after_upload: true       # 上传成功后清理 download/extract/output 中该分片，节省磁盘
+
+ffmpeg:
+  audio_sample_rate: 16000
+  max_width: 480
+  max_height: 360

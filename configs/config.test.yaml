@@ -1,0 +1,57 @@
+source_repo: local/test
+target_repo: local/out
+workdir: /Users/nianzhen/Desktop/world_model/tmp_test_workdir
+hf_token: null
+shards:
+  - fake_shard.zip
+
+runtime:
+  stream_processing: true
+  scoring_workers: 2
+  queue_size: 4
+  prefetch_shards: 0
+  download_workers: 1
+
+splitter:
+  kind: pyscenedetect
+  threshold: 27.0
+  min_scene_len: 8
+  remove_source_after_split: false
+  cut: false
+  window_len_frames: 10
+  window_stride_frames: 5
+
+flash_filter:
+  enabled: false
+  brightness_delta: 60.0
+  max_flash_ratio: 0.2
+  sample_stride: 5
+  record_only: false
+
+ocr:
+  enabled: false
+  text_area_threshold: 0.01
+  sample_stride: 10
+  lang: ch
+  record_only: false
+
+caption:
+  enabled: false
+
+models:
+  - name: sanity
+    kind: dummy
+    threshold: 0.0
+    device: cpu
+    batch_size: 4
+
+upload:
+  chunk_size_mb: 4
+  max_workers: 1
+  resize_720p: false
+  cleanup_after_upload: false
+
+ffmpeg:
+  audio_sample_rate: 16000
+  max_width: 480
+  max_height: 360
