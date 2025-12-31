@@ -82,6 +82,7 @@ class CaptionConfig:
     response_field: str = "caption"
     extra_fields: Dict[str, Any] = field(default_factory=dict)
     include_image: bool = True  # openrouter: 若可读取视频帧则附带图片
+    image_num_frames: int = 4  # openrouter: 均匀抽取的帧数
     image_max_side: int = 512   # openrouter: 降采样最长边，降低 payload
     openrouter_referer: str | None = None  # 可选：OpenRouter 推荐传递
     openrouter_title: str | None = None
@@ -149,6 +150,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HF video filtering pipeline")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
     parser.add_argument(
+        "--shards-file",
+        type=str,
+        default=None,
+        help="Override shards_file in config (path to a file with one shard per line)",
+    )
+    parser.add_argument(
         "--limit-shards",
         type=int,
         default=None,
@@ -190,7 +197,12 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def load_config(path: Path, limit_shards: int | None = None, skip_upload: bool = False) -> Config:
+def load_config(
+    path: Path,
+    limit_shards: int | None = None,
+    skip_upload: bool = False,
+    override_shards_file: Path | None = None,
+) -> Config:
     raw = _load_yaml(path)
     base_dir = path.parent
 
@@ -206,7 +218,7 @@ def load_config(path: Path, limit_shards: int | None = None, skip_upload: bool =
         for m in raw.get("models", [])
     ]
 
-    shards_file = raw.get("shards_file")
+    shards_file = override_shards_file or raw.get("shards_file")
     sf_path: Path | None = None
     shards: List[str] = []
     if shards_file:

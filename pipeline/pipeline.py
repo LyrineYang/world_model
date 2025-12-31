@@ -669,7 +669,13 @@ def _write_summary(path: Path, data: dict) -> None:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_config(Path(args.config), limit_shards=args.limit_shards, skip_upload=args.skip_upload)
+    override_shards_file = Path(args.shards_file) if getattr(args, "shards_file", None) else None
+    cfg = load_config(
+        Path(args.config),
+        limit_shards=args.limit_shards,
+        skip_upload=args.skip_upload,
+        override_shards_file=override_shards_file,
+    )
     info_level = logging.INFO
     important_level = logging.INFO
     # 解析校准 CLI 参数
