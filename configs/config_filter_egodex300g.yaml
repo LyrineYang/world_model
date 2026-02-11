@@ -1,0 +1,96 @@
+source_repo: local/unused
+target_repo: local/unused
+workdir: /data/world_model_egodex300g
+
+shards_file:
+shards: []
+
+runtime:
+  stream_processing: true
+  scoring_workers: 2
+  queue_size: 128
+  prefetch_shards: 0
+  download_workers: 1
+
+splitter:
+  kind: pyscenedetect
+  device: cuda:0
+  batch_size: 32
+  chunk_size_frames: 4000
+  stride_frames: 1
+  transnet_threshold: 0.5
+  weight_path:
+  hf_repo_id: Sn4kehead/TransNetV2
+  hf_filename: transnetv2-pytorch-weights.pth
+  threshold: 27.0
+  min_scene_len: 16
+  remove_source_after_split: false
+  cut: false
+  window_len_frames: 121
+  window_stride_frames: 60
+
+flash_filter:
+  enabled: false
+  brightness_delta: 60.0
+  max_flash_ratio: 0.2
+  sample_stride: 5
+  record_only: false
+
+calibration:
+  enabled: false
+  sample_size: 10000
+  output: calibration_meta.parquet
+  quantiles: [0.4, 0.7]
+
+ocr:
+  enabled: false
+  text_area_threshold: 0.01
+  sample_stride: 10
+  lang: ch
+  use_gpu: false
+  record_only: false
+
+selection:
+  strategy: "dover >= dover_thr and motion >= motion_thr"
+
+caption:
+  enabled: false
+
+models:
+  - name: dover
+    kind: dover
+    threshold: 0.57
+    device: cuda:0
+    batch_size: 32
+    repo_path: ./third_party/DOVER
+    config_path: dover.yml
+    weight_path: pretrained_weights/DOVER.pth
+    data_key: val-l1080p
+    output: fused
+  - name: motion
+    kind: unimatch_flow
+    threshold: 87.0
+    device: cuda:0
+    batch_size: 8
+    repo_path: ./third_party/unimatch
+    weight_path: pretrained/gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth
+    num_pairs: 3
+    resize: [320, 576]
+    padding_factor: 16
+    num_scales: 1
+    upsample_factor: 8
+    attn_splits_list: [2]
+    corr_radius_list: [-1]
+    prop_radius_list: [-1]
+    num_reg_refine: 1
+
+upload:
+  chunk_size_mb: 512
+  max_workers: 3
+  resize_720p: false
+  cleanup_after_upload: false
+
+ffmpeg:
+  audio_sample_rate: 16000
+  max_width: 480
+  max_height: 360
