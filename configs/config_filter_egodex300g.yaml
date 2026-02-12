@@ -62,6 +62,11 @@ models:
     threshold: 0.57
     device: cuda:0
     batch_size: 32
+    precision: bf16
+    compile: true
+    compile_mode: reduce-overhead
+    decode_device: auto
+    decode_gpu_index: 0
     repo_path: ./third_party/DOVER
     config_path: dover.yml
     weight_path: pretrained_weights/DOVER.pth
@@ -72,6 +77,11 @@ models:
     threshold: 87.0
     device: cuda:0
     batch_size: 8
+    precision: bf16
+    compile: true
+    compile_mode: reduce-overhead
+    decode_device: auto
+    decode_gpu_index: 0
     repo_path: ./third_party/unimatch
     weight_path: pretrained/gmflow-scale1-mixdata-train320x576-4c3a6e9a.pth
     num_pairs: 3
