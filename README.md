@@ -146,7 +146,19 @@ python -m pipeline.pipeline --config config.yaml
 - 元数据：`workdir/output/{shard}/metadata.jsonl`，包含 scores/过滤记录和可选 caption
 - 校准时输出 `calibration_meta.parquet` 并打印分位数
 
-## 常见问题
-- RapidOCR 加载失败：确认已安装 `rapidocr-onnxruntime`；若设置了 `ocr.use_gpu: true`，需额外安装匹配驱动的 `onnxruntime-gpu`，否则改为 `use_gpu: false`。
-- 模型找不到权重：检查 `extra.weight_path`，按示例放置或让脚本自动下载（DOVER）
-- GPU 利用率低：确认 `runtime.stream_processing=true`、`scoring_workers`>1、模型 `device` 分配合理
+
+## EgoDex 清洗（离线视频）
+
+EgoDex 解压后的 `.mp4` 可直接清洗，无需转码。
+
+```bash
+# 在仓库根目录执行
+export EGODEX_ROOT=../datasets/egodex300g
+
+python scripts/run_workflow.py offline-filter \
+  --config configs/config_filter_egodex300g.yaml \
+  --input-dir "$EGODEX_ROOT" \
+  --recursive \
+  --copy-mode link \
+  --output-dir ./workdir_egodex300g/output/offline_egodex300g
+```
