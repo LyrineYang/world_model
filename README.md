@@ -122,12 +122,42 @@ python -m pipeline.caption_only --config configs/profiles/caption_only_qwen3.yam
 
 EgoDex 解压后视频可直接用于清洗（`.mp4`），无需额外转码。
 
+### 8.1 推荐：服务器标准化一键命令（固定路径 + 固定环境名）
+
+脚本固定参数：
+- Repo 路径：`/scratch/ayuille1/jchen293/wcloong/world_model`
+- Conda 环境名：`world-model-filter`
+- 数据 zip 目录：`/scratch/ayuille1/jchen293/wcloong/egoworld/egoworld/data`
+- 默认解压目录：`/scratch/ayuille1/jchen293/wcloong/egoworld/egoworld/data/extracted`
+
+```bash
+cd /scratch/ayuille1/jchen293/wcloong/world_model
+
+# 一次性完成：解压(如需) + 建环境 + third_party + 权重 + doctor + 清洗
+bash scripts/egodex_clean.sh all
+
+# 分步执行
+bash scripts/egodex_clean.sh prepare-data
+bash scripts/egodex_clean.sh setup
+bash scripts/egodex_clean.sh doctor
+bash scripts/egodex_clean.sh run
+```
+
+清理命令：
+```bash
+bash scripts/egodex_clean.sh clean-output   # 仅清理输出目录
+bash scripts/egodex_clean.sh clean-workdir  # 清理 workdir
+bash scripts/egodex_clean.sh clean-env      # 删除 conda 环境
+bash scripts/egodex_clean.sh clean-all      # 全部清理
+```
+
+### 8.2 原始命令（保留）
 ```bash
 # 0) 在仓库根目录执行
 # cd <world_model_root>
 
 # 1) 设置数据根目录（绝对或相对均可）
-export EGODEX_ROOT=../datasets/egodex300g
+export EGODEX_ROOT=/scratch/ayuille1/jchen293/wcloong/egoworld/egoworld/data/extracted
 
 # 2) 可选：环境检查
 python scripts/check_env.py
