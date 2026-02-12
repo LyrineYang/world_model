@@ -2,14 +2,31 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _build_run_env() -> dict[str, str]:
+    env = os.environ.copy()
+    repo_root = str(REPO_ROOT)
+    current_pythonpath = env.get("PYTHONPATH", "")
+    if not current_pythonpath:
+        env["PYTHONPATH"] = repo_root
+        return env
+
+    paths = current_pythonpath.split(os.pathsep)
+    if repo_root not in paths:
+        env["PYTHONPATH"] = repo_root + os.pathsep + current_pythonpath
+    return env
+
 
 def _run(cmd: list[str]) -> None:
     print("[run]", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, cwd=REPO_ROOT, env=_build_run_env())
 
 
 def _add_filter_args(parser: argparse.ArgumentParser) -> None:
