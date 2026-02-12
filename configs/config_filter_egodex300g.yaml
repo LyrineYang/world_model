@@ -1,6 +1,6 @@
 source_repo: local/unused
 target_repo: local/unused
-workdir: /data/world_model_egodex300g
+workdir: ./workdir_egodex300g
 
 shards_file:
 shards: []

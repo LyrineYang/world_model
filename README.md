@@ -123,16 +123,22 @@ python -m pipeline.caption_only --config configs/profiles/caption_only_qwen3.yam
 EgoDex 解压后视频可直接用于清洗（`.mp4`），无需额外转码。
 
 ```bash
-# 1) 可选：环境检查
+# 0) 在仓库根目录执行
+# cd <world_model_root>
+
+# 1) 设置数据根目录（绝对或相对均可）
+export EGODEX_ROOT=../datasets/egodex300g
+
+# 2) 可选：环境检查
 python scripts/check_env.py
 
-# 2) 按 EgoDex 300G 配置做离线过滤（递归扫描所有 mp4）
+# 3) 按 EgoDex 300G 配置做离线过滤（递归扫描所有 mp4）
 python scripts/run_workflow.py offline-filter \
   --config configs/config_filter_egodex300g.yaml \
-  --input-dir /data/egodex300g \
+  --input-dir "$EGODEX_ROOT" \
   --recursive \
   --copy-mode link \
-  --output-dir /data/world_model_egodex300g/output/offline_egodex300g
+  --output-dir ./workdir_egodex300g/output/offline_egodex300g
 ```
 
 如果要覆盖更严格/更宽松筛选逻辑，可在命令中追加：
