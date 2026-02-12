@@ -1,0 +1,15 @@
+# Base filter runtime (default): DOVER + UniMatch pipeline dependencies.
+huggingface_hub
+requests
+pyyaml
+tqdm
+scenedetect
+opencv-python-headless
+decord
+timm
+einops
+Pillow
+pandas
+pyarrow
+scikit-video
+numpy

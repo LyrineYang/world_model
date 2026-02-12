@@ -1,0 +1,3 @@
+# Note: these wheels are CUDA/platform specific and may require local mirroring.
+nvidia-dali-cuda120
+transnetv2-pytorch

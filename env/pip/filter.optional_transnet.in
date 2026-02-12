@@ -1,0 +1,3 @@
+# Optional: GPU scene splitter backend
+nvidia-dali-cuda120
+transnetv2-pytorch

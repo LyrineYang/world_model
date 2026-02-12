@@ -1,0 +1,11 @@
+# Caption runtime for local Qwen3 provider
+transformers
+accelerate
+sentencepiece
+safetensors
+decord
+Pillow
+requests
+pyyaml
+tqdm
+numpy

@@ -1,0 +1,19 @@
+# Single source of truth for third-party repositories used by the pipeline.
+repos:
+  - name: DOVER
+    url: https://github.com/VQAssessment/DOVER.git
+    commit: f1ddc96215bc7fbcf8f315c65d47905f339c3419
+    path: third_party/DOVER
+    enabled: true
+
+  - name: unimatch
+    url: https://github.com/autonomousvision/unimatch.git
+    commit: 943a99006950ab6c84ea72a72beb147fdd03c19a
+    path: third_party/unimatch
+    enabled: true
+
+  - name: aesthetic-predictor
+    url: https://github.com/LAION-AI/aesthetic-predictor.git
+    commit: 6d122adad522ab246644d9dc1c6d7a3810ee255f
+    path: third_party/aesthetic-predictor
+    enabled: true
