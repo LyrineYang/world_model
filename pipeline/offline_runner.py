@@ -336,12 +336,19 @@ def main() -> None:
         scoring_workers = cfg.runtime.scoring_workers if cfg.runtime.scoring_workers else max(len(cfg.models), 1)
         consistency_pending = _consistency_pending_kinds([m.kind for m in cfg.models])
         scorers = build_scorers(cfg.models)
-        scored = run_scorers(
-            scorers,
-            records,
-            max_workers=scoring_workers,
-            strategy_expr=strategy_expr,
-        )
+        try:
+            scored = run_scorers(
+                scorers,
+                records,
+                max_workers=scoring_workers,
+                strategy_expr=strategy_expr,
+            )
+        except TypeError:
+            scored = run_scorers(
+                scorers,
+                records,
+                max_workers=scoring_workers,
+            )
         written = _write_outputs(
             output_dir,
             records,
