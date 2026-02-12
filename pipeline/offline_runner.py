@@ -291,9 +291,11 @@ def main() -> None:
     cfg_path = Path(args.config).expanduser().resolve()
     cfg = load_config(cfg_path, skip_upload=True)
 
-    if args.strategy:
-        cfg.selection.strategy = args.strategy
-    strategy_expr = (cfg.selection.strategy or "").strip() or None
+    selection_cfg = getattr(cfg, "selection", None)
+    default_strategy = getattr(selection_cfg, "strategy", None) if selection_cfg is not None else None
+    if args.strategy and selection_cfg is not None:
+        selection_cfg.strategy = args.strategy
+    strategy_expr = (args.strategy or default_strategy or "").strip() or None
 
     started = time.time()
     started_iso = datetime.now(timezone.utc).isoformat()
