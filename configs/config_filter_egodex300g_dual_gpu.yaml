@@ -8,7 +8,7 @@ shards: []
 runtime:
   stream_processing: true
   scoring_workers: 2
-  queue_size: 128
+  queue_size: 256
   prefetch_shards: 0
   download_workers: 1
 
@@ -60,13 +60,13 @@ models:
   - name: dover
     kind: dover
     threshold: 0.57
-    device: cuda:0
-    batch_size: 64
+    device: cuda:1
+    batch_size: 96
     precision: bf16
     compile: false
     compile_mode: reduce-overhead
     decode_device: auto
-    decode_gpu_index: 0
+    decode_gpu_index: 1
     repo_path: ./third_party/DOVER
     config_path: dover.yml
     weight_path: pretrained_weights/DOVER.pth
@@ -76,7 +76,7 @@ models:
     kind: unimatch_flow
     threshold: 87.0
     device: cuda:0
-    batch_size: 32
+    batch_size: 48
     precision: bf16
     compile: false
     compile_mode: reduce-overhead

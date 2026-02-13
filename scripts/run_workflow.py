@@ -95,6 +95,13 @@ def _build_offline_filter_cmd(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--output-dir", args.output_dir])
     if args.copy_mode:
         cmd.extend(["--copy-mode", args.copy_mode])
+    cmd.append("--resume" if args.resume else "--no-resume")
+    if args.flush_every is not None:
+        cmd.extend(["--flush-every", str(args.flush_every)])
+    if args.runlog_every is not None:
+        cmd.extend(["--runlog-every", str(args.runlog_every)])
+    if args.write_buffer_records is not None:
+        cmd.extend(["--write-buffer-records", str(args.write_buffer_records)])
     return cmd
 
 
@@ -130,6 +137,11 @@ def parse_args() -> argparse.Namespace:
     p_offline.add_argument("--strategy", type=str, default=None, help="Override selection strategy")
     p_offline.add_argument("--output-dir", type=str, default=None, help="Output directory")
     p_offline.add_argument("--copy-mode", choices=["link", "copy"], default="link", help="Materialization mode")
+    p_offline.add_argument("--resume", dest="resume", action="store_true", default=True, help="Resume from existing metadata")
+    p_offline.add_argument("--no-resume", dest="resume", action="store_false", help="Disable resume")
+    p_offline.add_argument("--flush-every", type=int, default=None, help="Flush metadata every N batches")
+    p_offline.add_argument("--runlog-every", type=int, default=None, help="Update runlog every N batches")
+    p_offline.add_argument("--write-buffer-records", type=int, default=None, help="Buffer N records before writing")
 
     return parser.parse_args()
 

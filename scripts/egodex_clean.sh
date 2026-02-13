@@ -6,11 +6,16 @@ set -euo pipefail
 
 REPO_DIR="/scratch/ayuille1/jchen293/wcloong/world_model"
 ENV_NAME="world-model-filter"
-CONFIG_PATH="configs/config_filter_egodex300g.yaml"
+CONFIG_PATH="${EGODEX_CONFIG_PATH:-configs/config_filter_egodex300g_dual_gpu.yaml}"
 DATA_ZIP_ROOT="/scratch/ayuille1/jchen293/wcloong/egoworld/egoworld/data"
 DEFAULT_EGODEX_ROOT="${DATA_ZIP_ROOT}/extracted"
 DEFAULT_OUTPUT_DIR="${REPO_DIR}/workdir_egodex300g/output/offline_egodex300g"
 DEFAULT_WORKDIR="${REPO_DIR}/workdir_egodex300g"
+EGODEX_FLUSH_EVERY="${EGODEX_FLUSH_EVERY:-2}"
+EGODEX_RUNLOG_EVERY="${EGODEX_RUNLOG_EVERY:-5}"
+EGODEX_WRITE_BUFFER_RECORDS="${EGODEX_WRITE_BUFFER_RECORDS:-128}"
+EGODEX_RESUME="${EGODEX_RESUME:-1}"
+EGODEX_CUDA_VISIBLE_DEVICES="${EGODEX_CUDA_VISIBLE_DEVICES:-0,1}"
 
 usage() {
   cat <<'USAGE'
@@ -29,6 +34,9 @@ Examples:
   bash scripts/egodex_clean.sh prepare-data
   bash scripts/egodex_clean.sh all
   bash scripts/egodex_clean.sh run /scratch/ayuille1/jchen293/wcloong/egoworld/egoworld/data/extracted /scratch/output/egodex_clean
+  EGODEX_CONFIG_PATH=configs/config_filter_egodex300g_dual_gpu.yaml bash scripts/egodex_clean.sh run
+  EGODEX_CUDA_VISIBLE_DEVICES=0,1 bash scripts/egodex_clean.sh run
+  EGODEX_FLUSH_EVERY=1 EGODEX_RUNLOG_EVERY=2 EGODEX_WRITE_BUFFER_RECORDS=64 bash scripts/egodex_clean.sh run
 USAGE
 }
 
@@ -121,6 +129,15 @@ cmd_run() {
   activate_env
   local egodex_root="${1:-${DEFAULT_EGODEX_ROOT}}"
   local output_dir="${2:-${DEFAULT_OUTPUT_DIR}}"
+  local resume_flag="--resume"
+  case "$(echo "${EGODEX_RESUME}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off)
+      resume_flag="--no-resume"
+      ;;
+  esac
+  if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${EGODEX_CUDA_VISIBLE_DEVICES}"
+  fi
   if [[ ! -d "${egodex_root}" ]]; then
     echo "[error] egodex_root not found: ${egodex_root}" >&2
     echo "[hint] run: bash scripts/egodex_clean.sh prepare-data" >&2
@@ -134,12 +151,17 @@ cmd_run() {
     exit 1
   fi
 
+  echo "[run] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
   python scripts/run_workflow.py offline-filter \
     --config "${CONFIG_PATH}" \
     --input-dir "${egodex_root}" \
     --recursive \
     --copy-mode link \
-    --output-dir "${output_dir}"
+    --output-dir "${output_dir}" \
+    "${resume_flag}" \
+    --flush-every "${EGODEX_FLUSH_EVERY}" \
+    --runlog-every "${EGODEX_RUNLOG_EVERY}" \
+    --write-buffer-records "${EGODEX_WRITE_BUFFER_RECORDS}"
 }
 
 cmd_all() {
